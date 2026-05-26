@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RAN1 Meeting Schedule</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f4f4f1;
+    --surface: #ffffff;
+    --ink: #1a1a1a;
+    --muted: #6b6b6b;
+    --line: #e2e2dc;
+    --line-strong: #c9c9c2;
+    --now: #d92b2b;
+
+    /* category colors */
+    --cat-6GR:   #2a7a6f;
+    --cat-AI78:  #c2185b;
+    --cat-MAINT: #c97a14;
+    --cat-R20:   #2e5cb8;
+
+    --row-h: 28px;       /* height per 10 min */
+    --label-w: 64px;     /* time column width */
+    --col-min-w: 200px;  /* min room column width */
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.35;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    padding: 18px 24px 12px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+    position: sticky; top: 0; z-index: 50;
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+  .meta { font-size: 11px; color: var(--muted); margin-bottom: 12px; font-family: 'IBM Plex Mono', monospace; }
+  .meta a { color: inherit; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .chip {
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    color: var(--ink);
+    padding: 5px 11px;
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 999px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+    user-select: none;
+  }
+  .chip.cat[data-on="true"] { color: white; border-color: transparent; }
+  .chip.cat[data-cat="6GR"][data-on="true"]   { background: var(--cat-6GR); }
+  .chip.cat[data-cat="AI78"][data-on="true"]  { background: var(--cat-AI78); }
+  .chip.cat[data-cat="MAINT"][data-on="true"] { background: var(--cat-MAINT); }
+  .chip.cat[data-cat="R20"][data-on="true"]   { background: var(--cat-R20); }
+  .chip.cat[data-on="false"] { opacity: 0.45; }
+
+  .chip.day[data-on="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  .chip.now { background: var(--now); color: white; border-color: var(--now); }
+  .chip.now:hover { filter: brightness(1.1); }
+
+  .divider { width: 1px; height: 18px; background: var(--line-strong); margin: 0 4px; }
+
+  main { padding: 16px 24px 80px; }
+
+  .day-section { margin-bottom: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .day-title {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--line);
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: #fafaf7;
+  }
+  .day-title .date { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  .day-title .today-badge {
+    display: inline-block;
+    background: var(--now);
+    color: white;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-left: 8px;
+    letter-spacing: 0.06em;
+    vertical-align: middle;
+  }
+
+  .grid-wrap { overflow-x: auto; }
+  .grid {
+    display: grid;
+    grid-template-columns: var(--label-w) repeat(var(--n-rooms), minmax(var(--col-min-w), 1fr));
+    position: relative;
+    min-width: 100%;
+  }
+  .room-head {
+    padding: 8px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--line);
+    border-left: 1px solid var(--line);
+    background: #fafaf7;
+    position: sticky; top: 0;
+    text-align: center;
+  }
+  .time-head { border-bottom: 1px solid var(--line); background: #fafaf7; }
+
+  /* time labels */
+  .time-col, .room-col { position: relative; }
+  .time-col {
+    border-right: 1px solid var(--line);
+  }
+  .time-label {
+    position: absolute;
+    right: 6px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    transform: translateY(-50%);
+  }
+
+  .room-col {
+    border-left: 1px solid var(--line);
+    position: relative;
+  }
+
+  /* hour grid lines */
+  .hour-line {
+    position: absolute;
+    left: 0; right: 0;
+    border-top: 1px dashed var(--line);
+    pointer-events: none;
+  }
+  .hour-line.solid { border-top-style: solid; }
+
+  /* break blocks */
+  .break-block {
+    position: absolute;
+    left: 0; right: 0;
+    background: repeating-linear-gradient(45deg, #f4f4f1, #f4f4f1 4px, #ececde 4px, #ececde 8px);
+    color: var(--muted);
+    font-size: 10px;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+
+  /* session blocks */
+  .session {
+    position: absolute;
+    left: 2px; right: 2px;
+    padding: 4px 6px;
+    border-radius: 3px;
+    color: white;
+    font-size: 11px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.05s;
+    border-left: 3px solid rgba(0,0,0,0.25);
+  }
+  .session:hover { transform: translateX(1px); filter: brightness(1.06); }
+  .session[data-cat="6GR"]   { background: var(--cat-6GR); }
+  .session[data-cat="AI78"]  { background: var(--cat-AI78); }
+  .session[data-cat="MAINT"] { background: var(--cat-MAINT); }
+  .session[data-cat="R20"]   { background: var(--cat-R20); }
+  .session.dim { opacity: 0.12; }
+  .session .s-title { font-weight: 600; }
+  .session .s-meta { font-family: 'IBM Plex Mono', monospace; font-size: 10px; opacity: 0.9; }
+  .session .s-ai { margin-top: 2px; font-size: 10px; opacity: 0.95; }
+
+  /* NOW line */
+  .now-line {
+    position: absolute;
+    left: 0; right: 0;
+    height: 0;
+    border-top: 2px solid var(--now);
+    z-index: 10;
+    pointer-events: none;
+  }
+  .now-line::before {
+    content: "";
+    position: absolute;
+    left: -5px; top: -5px;
+    width: 8px; height: 8px;
+    background: var(--now);
+    border-radius: 50%;
+  }
+  .now-line .now-label {
+    position: absolute;
+    right: 4px; top: -16px;
+    background: var(--now);
+    color: white;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 2px;
+  }
+
+  /* filter side panel */
+  .panel-toggle {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 60;
+    background: var(--ink);
+    color: var(--bg);
+    border: none;
+    padding: 10px 16px;
+    border-radius: 999px;
+    cursor: pointer;
+    font-family: inherit;
+    font-weight: 500;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  }
+  .panel {
+    position: fixed;
+    right: -340px;
+    top: 0; bottom: 0;
+    width: 320px;
+    background: var(--surface);
+    border-left: 1px solid var(--line);
+    transition: right 0.25s;
+    padding: 20px;
+    overflow-y: auto;
+    z-index: 70;
+  }
+  .panel.open { right: 0; }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; }
+  .panel .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .panel button.close { background: none; border: none; cursor: pointer; font-size: 18px; }
+  .panel .group { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .panel label { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; cursor: pointer; }
+  .panel input { accent-color: var(--ink); }
+
+  footer { text-align: center; padding: 16px; color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1 id="title">Loading...</h1>
+  <div class="meta" id="meta">Loading...</div>
+  <div class="controls" id="controls">
+    <button class="chip cat" data-cat="6GR"   data-on="true">6GR</button>
+    <button class="chip cat" data-cat="AI78"  data-on="true">AI 7/8</button>
+    <button class="chip cat" data-cat="MAINT" data-on="true">Maintenance</button>
+    <button class="chip cat" data-cat="R20"   data-on="true">R20</button>
+    <span class="divider"></span>
+    <button class="chip day" data-day="Mon" data-on="true">Mon</button>
+    <button class="chip day" data-day="Tue" data-on="true">Tue</button>
+    <button class="chip day" data-day="Wed" data-on="true">Wed</button>
+    <button class="chip day" data-day="Thu" data-on="true">Thu</button>
+    <button class="chip day" data-day="Fri" data-on="true">Fri</button>
+    <span class="divider"></span>
+    <button class="chip now" id="now-btn">NOW</button>
+  </div>
+</header>
+
+<main id="main"></main>
+
+<button class="panel-toggle" id="panel-toggle">◀ Filter</button>
+<aside class="panel" id="panel">
+  <div class="row">
+    <h2>Session Filter</h2>
+    <button class="close" id="panel-close">×</button>
+  </div>
+  <button class="chip" id="clear-filter" style="width:100%; margin-bottom:8px;">Clear</button>
+  <div style="font-size:11px; color:var(--muted);">Unchecked items are shown at 12% opacity.</div>
+  <div class="group" id="ai-filter-group"></div>
+</aside>
+
+<footer>
+  Built on a fork-friendly template. Edit the <code>scheduleData</code> object in the source to customize.
+</footer>
+
+<script>
+/* ============================================================
+   1. DATA — replace this with your meeting's schedule.
+   ============================================================
+   Times are 24h "HH:MM". Category is one of: 6GR, AI78, MAINT, R20.
+*/
+const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
+  "meeting": "RAN1",
+  "source": "(no data yet - run build.py)",
+  "sourceUrl": "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Chair_notes/",
+  "generated": "",
+  "rooms": ["Ballroom B (3F)", "Ballroom A (3F)", "Ballroom C (3F)", "Dalian Ballroom 1 (3F)", "Shanghai Function room (3F)"],
+  "dayRange": {"start": "08:30", "end": "19:30"},
+  "breaks": [
+    {"start": "10:30", "end": "11:00", "label": "Morning Coffee"},
+    {"start": "13:00", "end": "14:30", "label": "Lunch"},
+    {"start": "16:30", "end": "17:00", "label": "Afternoon Coffee"}
+  ],
+  "sessions": []
+} /*END:SCHEDULE_DATA*/;
+
+/* ============================================================
+   2. Rendering
+   ============================================================ */
+const PX_PER_MIN = 28 / 10; // matches --row-h: 28px per 10 min
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
+
+const toMin = (hhmm) => {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+};
+const dayStart = toMin(scheduleData.dayRange.start);
+const dayEnd   = toMin(scheduleData.dayRange.end);
+const totalH = (dayEnd - dayStart) * PX_PER_MIN;
+
+const state = {
+  cats:  { "6GR": true, "AI78": true, "MAINT": true, "R20": true },
+  days:  Object.fromEntries(DAYS.map(d => [d, true])),
+  aiFilter: {}, // AI id → boolean (true = visible). default true.
+};
+
+// Detect today's day-of-week and auto-focus that day if it's Mon–Fri.
+// On weekends, show all days.
+const TODAY_DAY = (() => {
+  const idx = (new Date().getDay() + 6) % 7; // Mon=0..Sun=6
+  return idx <= 4 ? DAYS[idx] : null;
+})();
+if (TODAY_DAY) {
+  DAYS.forEach(d => { state.days[d] = (d === TODAY_DAY); });
+}
+
+// Track whether the user has scrolled manually in the last 20 seconds.
+// If so, suppress auto-scroll-to-NOW so we don't yank them around.
+let lastUserScroll = 0;
+window.addEventListener("wheel",     () => { lastUserScroll = Date.now(); }, { passive: true });
+window.addEventListener("touchmove", () => { lastUserScroll = Date.now(); }, { passive: true });
+window.addEventListener("keydown", (e) => {
+  if (["PageDown","PageUp","ArrowUp","ArrowDown","Home","End"," "].includes(e.key)) lastUserScroll = Date.now();
+});
+
+function render() {
+  const main = document.getElementById("main");
+  main.innerHTML = "";
+
+  DAYS.forEach(day => {
+    if (!state.days[day]) return;
+    const daySessions = scheduleData.sessions.filter(s => s.day === day);
+    const section = document.createElement("section");
+    section.className = "day-section";
+    section.innerHTML = `
+      <div class="day-title">${day}${day === TODAY_DAY ? ' <span class="today-badge">TODAY</span>' : ''}<span class="date"></span></div>
+      <div class="grid-wrap"><div class="grid" style="--n-rooms:${scheduleData.rooms.length}"></div></div>
+    `;
+    const grid = section.querySelector(".grid");
+
+    // headers
+    const empty = document.createElement("div"); empty.className = "time-head"; grid.appendChild(empty);
+    scheduleData.rooms.forEach(r => {
+      const h = document.createElement("div"); h.className = "room-head"; h.textContent = r; grid.appendChild(h);
+    });
+
+    // time column + room columns
+    const timeCol = document.createElement("div");
+    timeCol.className = "time-col";
+    timeCol.style.height = totalH + "px";
+    timeCol.style.gridColumn = "1";
+    grid.appendChild(timeCol);
+
+    // half-hour ticks
+    for (let m = dayStart; m <= dayEnd; m += 30) {
+      const top = (m - dayStart) * PX_PER_MIN;
+      const label = document.createElement("div");
+      label.className = "time-label";
+      const hh = String(Math.floor(m / 60)).padStart(2, "0");
+      const mm = String(m % 60).padStart(2, "0");
+      label.textContent = `${hh}:${mm}`;
+      label.style.top = top + "px";
+      timeCol.appendChild(label);
+    }
+
+    // room columns
+    const roomCols = scheduleData.rooms.map((_, idx) => {
+      const c = document.createElement("div");
+      c.className = "room-col";
+      c.style.height = totalH + "px";
+      c.style.gridColumn = (idx + 2).toString();
+      grid.appendChild(c);
+      // hour lines
+      for (let m = dayStart; m <= dayEnd; m += 30) {
+        const top = (m - dayStart) * PX_PER_MIN;
+        const ln = document.createElement("div");
+        ln.className = "hour-line" + (m % 60 === 0 ? " solid" : "");
+        ln.style.top = top + "px";
+        c.appendChild(ln);
+      }
+      // breaks
+      scheduleData.breaks.forEach(br => {
+        const top = (toMin(br.start) - dayStart) * PX_PER_MIN;
+        const h = (toMin(br.end) - toMin(br.start)) * PX_PER_MIN;
+        const block = document.createElement("div");
+        block.className = "break-block";
+        block.style.top = top + "px";
+        block.style.height = h + "px";
+        block.textContent = idx === 0 ? br.label : "";
+        c.appendChild(block);
+      });
+      return c;
+    });
+
+    // sessions
+    daySessions.forEach(s => {
+      const top = (toMin(s.start) - dayStart) * PX_PER_MIN;
+      const h   = (toMin(s.end) - toMin(s.start)) * PX_PER_MIN;
+      const div = document.createElement("div");
+      div.className = "session";
+      div.dataset.cat = s.category;
+      div.dataset.ai = s.ai;
+      div.style.top = top + "px";
+      div.style.height = (h - 2) + "px";
+      const dur = toMin(s.end) - toMin(s.start);
+      div.innerHTML = `
+        <div class="s-title">${s.title}${s.host ? ` <span style="opacity:.8;font-weight:400">· ${s.host}</span>` : ""}</div>
+        <div class="s-meta">${s.start}–${s.end} (${dur}m)</div>
+        <div class="s-ai">${s.ai}</div>
+      `;
+      div.title = `${s.title}\n${s.ai}\n${s.start}–${s.end}${s.host ? "\n" + s.host : ""}`;
+      // dim if filtered out
+      const catOn = state.cats[s.category];
+      const aiOn = state.aiFilter[s.ai] !== false;
+      if (!catOn || !aiOn) div.classList.add("dim");
+      roomCols[s.room].appendChild(div);
+    });
+
+    // now line
+    drawNowLine(roomCols, day);
+
+    main.appendChild(section);
+  });
+}
+
+function drawNowLine(roomCols, day) {
+  const now = new Date();
+  const dayIdx = (now.getDay() + 6) % 7; // Mon=0 .. Sun=6
+  const dayName = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][dayIdx];
+  if (dayName !== day) return;
+  const mins = now.getHours() * 60 + now.getMinutes();
+  if (mins < dayStart || mins > dayEnd) return;
+  const top = (mins - dayStart) * PX_PER_MIN;
+  roomCols.forEach((c, i) => {
+    const line = document.createElement("div");
+    line.className = "now-line";
+    line.style.top = top + "px";
+    if (i === roomCols.length - 1) {
+      const lbl = document.createElement("div");
+      lbl.className = "now-label";
+      lbl.textContent = `NOW ${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
+      line.appendChild(lbl);
+    }
+    c.appendChild(line);
+  });
+}
+
+function buildAIFilter() {
+  const ais = [...new Set(scheduleData.sessions.map(s => s.ai))].sort();
+  ais.forEach(ai => { if (state.aiFilter[ai] === undefined) state.aiFilter[ai] = true; });
+  const grp = document.getElementById("ai-filter-group");
+  grp.innerHTML = "<div style='font-size:11px;color:var(--muted);margin-bottom:6px;'>AGENDA ITEMS</div>";
+  ais.forEach(ai => {
+    const lbl = document.createElement("label");
+    lbl.innerHTML = `<input type="checkbox" ${state.aiFilter[ai] ? "checked" : ""} data-ai="${ai}"> <span>${ai}</span>`;
+    grp.appendChild(lbl);
+  });
+  grp.addEventListener("change", e => {
+    if (e.target.matches("input[data-ai]")) {
+      state.aiFilter[e.target.dataset.ai] = e.target.checked;
+      render();
+    }
+  });
+}
+
+/* ============================================================
+   3. Wiring
+   ============================================================ */
+document.getElementById("controls").addEventListener("click", e => {
+  if (!e.target.matches(".chip")) return;
+  const cat = e.target.dataset.cat;
+  const day = e.target.dataset.day;
+  if (cat) {
+    state.cats[cat] = e.target.dataset.on !== "true";
+    e.target.dataset.on = state.cats[cat];
+    render();
+  } else if (day) {
+    state.days[day] = e.target.dataset.on !== "true";
+    e.target.dataset.on = state.days[day];
+    render();
+  } else if (e.target.id === "now-btn") {
+    // scroll to today's NOW line
+    render();
+    setTimeout(() => {
+      const line = document.querySelector(".now-line");
+      if (line) line.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 50);
+  }
+});
+
+document.getElementById("panel-toggle").addEventListener("click", () => {
+  document.getElementById("panel").classList.toggle("open");
+});
+document.getElementById("panel-close").addEventListener("click", () => {
+  document.getElementById("panel").classList.remove("open");
+});
+document.getElementById("clear-filter").addEventListener("click", () => {
+  Object.keys(state.aiFilter).forEach(k => state.aiFilter[k] = true);
+  document.querySelectorAll("#ai-filter-group input").forEach(i => i.checked = true);
+  render();
+});
+
+
+// Populate title + meta from data
+document.getElementById("title").textContent = "\ud83d\udcc5 " + (scheduleData.meeting || "Schedule");
+document.title = (scheduleData.meeting || "Schedule") + " - Schedule";
+const metaEl = document.getElementById("meta");
+if (scheduleData.source && scheduleData.sourceUrl) {
+  metaEl.innerHTML = 'Source: <a href="' + scheduleData.sourceUrl + '" target="_blank" rel="noopener">' +
+    scheduleData.source + '</a>' +
+    (scheduleData.generated ? ' \u00b7 Updated: ' + scheduleData.generated : '');
+} else {
+  metaEl.textContent = scheduleData.source || '';
+}
+
+buildAIFilter();
+
+// Reflect TODAY_DAY in the day chips (so the toggle state matches state.days)
+if (TODAY_DAY) {
+  document.querySelectorAll(".chip.day").forEach(btn => {
+    btn.dataset.on = (btn.dataset.day === TODAY_DAY) ? "true" : "false";
+  });
+}
+
+render();
+
+// Scroll to NOW on initial load (or to morning if NOW isn't in range)
+function scrollToNowOrTop() {
+  const line = document.querySelector(".now-line");
+  if (line) {
+    line.scrollIntoView({ behavior: "smooth", block: "center" });
+  } else {
+    // No NOW line (off-hours or non-meeting day) — scroll to top of first visible day
+    const first = document.querySelector(".day-section");
+    if (first) first.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+setTimeout(scrollToNowOrTop, 100);
+
+// Every minute: re-render to update NOW position, and gently auto-scroll
+// to follow NOW — but ONLY if the user hasn't scrolled in the last 20 seconds.
+setInterval(() => {
+  render();
+  if (Date.now() - lastUserScroll > 20_000) {
+    const line = document.querySelector(".now-line");
+    if (line) line.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+}, 60_000);
+</script>
+</body>
+</html>
