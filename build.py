@@ -243,6 +243,23 @@ def cell_span(cell):
         span = int(gs.get(NS_W + 'val', '1'))
     return span
 
+def end_align_sessions(sessions, period_end):
+    """Shift sessions forward so they end-align with period_end.
+
+    Used for Monday's first time slot where the meeting commences at ~09:00
+    (so the 08:30-10:30 slot is only partially filled, and the content
+    belongs at the END of the slot, not the start).
+    """
+    if not sessions:
+        return sessions
+    last_end = max(to_min(s['end']) for s in sessions)
+    shift = period_end - last_end
+    if shift > 0:
+        for s in sessions:
+            s['start'] = to_hhmm(to_min(s['start']) + shift)
+            s['end']   = to_hhmm(to_min(s['end']) + shift)
+    return sessions
+
 def fuzzy_category(label):
     if not label:
         return 'R20'
@@ -260,9 +277,31 @@ def fuzzy_category(label):
 # -------- main parser (existing logic) --------
 
 def parse_main_cell(lines, period_start, period_end):
-    items = [l.strip() for l in lines if l.strip()]
+    # Pre-scan for two Monday-morning idioms:
+    #   1. "RAN1#NNN commences at HH:MM on Monday" → shift effective_start
+    #   2. "Agenda items 1, 2, 3, 4, 5"             → emit as filler later
+    effective_start = period_start
+    agenda_line = None
+    filtered = []
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        m_com = re.search(r'commences\s+at\s+(\d{1,2}):(\d{2})', s, re.IGNORECASE)
+        if m_com:
+            h = int(m_com.group(1)); mm = int(m_com.group(2))
+            new_start = h * 60 + mm
+            if new_start > effective_start:
+                effective_start = new_start
+            continue
+        if re.match(r'^agenda\s+items?\b', s, re.IGNORECASE):
+            agenda_line = s
+            continue
+        filtered.append(line)
+
+    items = [l.strip() for l in filtered if l.strip()]
     sessions = []
-    cursor = period_start
+    cursor = effective_start
     cat = None
     host = None
     pending = [None, 0, False]
@@ -323,6 +362,23 @@ def parse_main_cell(lines, period_start, period_end):
                 elif sub in HOSTS:
                     host = sub
     cursor = flush(cursor)
+
+    # If we detected "Agenda items..." but had no other sessions, emit it as
+    # a session spanning the entire effective window.
+    if agenda_line and not sessions:
+        sessions.append({
+            'start': to_hhmm(effective_start),
+            'end':   to_hhmm(period_end),
+            'title': agenda_line,
+            'ai':    'Agenda',
+            'category': 'R20',
+            'host':  host,
+        })
+    # Otherwise stash the agenda line on the first session so the table parser
+    # can insert it as a leading filler AFTER end-alignment shifts the rest.
+    if agenda_line and sessions:
+        sessions[0]['_agenda_line'] = agenda_line
+        sessions[0]['_effective_start'] = effective_start
     return sessions
 
 def parse_main_table(tbl, day_to_cols, room_assignment, cell_parser):
@@ -347,6 +403,7 @@ def parse_main_table(tbl, day_to_cols, room_assignment, cell_parser):
             continue
         ps, pe = PERIODS_BY_INDEX[period_idx]
         p_start, p_end = to_min(ps), to_min(pe)
+        this_period = period_idx
         period_idx += 1
         col = 0
         for cell in cells:
@@ -367,7 +424,34 @@ def parse_main_table(tbl, day_to_cols, room_assignment, cell_parser):
             if not dr:
                 continue
             day, room = dr
-            for s in cell_parser(lines, p_start, p_end):
+            cell_sessions = list(cell_parser(lines, p_start, p_end))
+            # Extract any stashed agenda-line info from parse_main_cell.
+            agenda_line = None
+            agenda_start = None
+            if cell_sessions and '_agenda_line' in cell_sessions[0]:
+                agenda_line = cell_sessions[0].pop('_agenda_line')
+                agenda_start = cell_sessions[0].pop('_effective_start')
+            # Monday's first slot starts late (commences at ~09:00) — end-align
+            # so sessions sit at the end of the 08:30-10:30 slot, not the start.
+            if day == 'Mon' and this_period == 0:
+                end_align_sessions(cell_sessions, p_end)
+            # If an "Agenda items..." line was detected and there's a gap
+            # between the effective start and the first session, insert a
+            # filler session.
+            if agenda_line is not None and cell_sessions:
+                first_min = min(to_min(s['start']) for s in cell_sessions)
+                if first_min > agenda_start:
+                    nums = re.findall(r'\d+(?:\.\d+)?', agenda_line)
+                    ai_label = ('AI ' + ', '.join(nums)) if nums else 'Agenda'
+                    cell_sessions.insert(0, {
+                        'start': to_hhmm(agenda_start),
+                        'end':   to_hhmm(first_min),
+                        'title': agenda_line,
+                        'ai':    ai_label,
+                        'category': 'R20',
+                        'host':  None,
+                    })
+            for s in cell_sessions:
                 s['day'] = day
                 s['room'] = room
                 sessions.append(s)
@@ -543,6 +627,7 @@ def parse_hiroki_table(tbl, offline):
             continue
         ps, pe = PERIODS_BY_INDEX[period_idx]
         p_start, p_end = to_min(ps), to_min(pe)
+        this_period = period_idx
         period_idx += 1
         day_cells_seen = 0
         for ci, cell in enumerate(cells):
@@ -556,6 +641,8 @@ def parse_hiroki_table(tbl, offline):
                 day_sessions = parse_hiroki_offline_cell(cell, p_start, p_end)
             else:
                 day_sessions = parse_hiroki_cell(cell, p_start, p_end)
+            if day == 'Mon' and this_period == 0:
+                end_align_sessions(day_sessions, p_end)
             for s in day_sessions:
                 s['day'] = day
                 if not offline:
@@ -580,8 +667,38 @@ def parse_hiroki_docx(docx_bytes):
 
 def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
     out = []
+
+    # Period intervals used for per-(day, period) override granularity.
+    period_intervals = [(to_min(s), to_min(e)) for s, e in PERIODS_BY_INDEX.values()]
+    def find_period_idx(s_min):
+        for i, (ps, pe) in enumerate(period_intervals):
+            if ps <= s_min < pe:
+                return i
+        return None
+
+    # For each (day, period), which rooms does Sorour/Hiroki actually override?
+    # Sorour file's Monday morning row often has gridSpan=3 on the first cell —
+    # meaning Sorour has NO Monday-AM data for Ballroom A or C. In those cases
+    # we must keep the main file's content rather than blank the slot.
+    sorour_a_cover = set()  # (day, period_idx)
+    for s in sorour_sessions:
+        if s['room'] != 'Ballroom A (3F)':
+            continue
+        pi = find_period_idx(to_min(s['start']))
+        if pi is not None:
+            sorour_a_cover.add((s['day'], pi))
+    hiroki_c_cover = set()
+    for s in hiroki_data['online']:
+        pi = find_period_idx(to_min(s['start']))
+        if pi is not None:
+            hiroki_c_cover.add((s['day'], pi))
+
     for s in main_sessions:
-        if s['room'] in ('Ballroom A (3F)', 'Ballroom C (3F)'):
+        sm = to_min(s['start'])
+        pi = find_period_idx(sm)
+        if s['room'] == 'Ballroom A (3F)' and pi is not None and (s['day'], pi) in sorour_a_cover:
+            continue
+        if s['room'] == 'Ballroom C (3F)' and pi is not None and (s['day'], pi) in hiroki_c_cover:
             continue
         out.append(s)
     for s in sorour_sessions:
@@ -590,7 +707,7 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
     for s in hiroki_data['online']:
         out.append(s)
 
-    period_intervals = [(to_min(s), to_min(e)) for s, e in PERIODS_BY_INDEX.values()]
+    # (period_intervals + find_period_idx already defined above.)
     def find_period(s_min):
         for ps, pe in period_intervals:
             if ps <= s_min < pe:
