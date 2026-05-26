@@ -384,7 +384,8 @@ function isWithinMeeting() {
    ============================================================ */
 const state = {
   cats:  { "6GR": true, "AI78": true, "MAINT": true, "R20": true },
-  days:  Object.fromEntries(DAYS.map(d => [d, true])),
+  // Days behave like tabs: exactly one day is shown at a time.
+  days:  Object.fromEntries(DAYS.map(d => [d, false])),
   aiFilter: {},
 };
 
@@ -394,9 +395,9 @@ const MEETING_DAY = (() => {
   const d = meetingNow().dayName;
   return DAYS.includes(d) ? d : null;
 })();
-if (MEETING_DAY) {
-  DAYS.forEach(d => { state.days[d] = (d === MEETING_DAY); });
-}
+// Default selected day: today (if within meeting), otherwise Monday.
+const DEFAULT_DAY = MEETING_DAY || 'Mon';
+state.days[DEFAULT_DAY] = true;
 
 let lastUserScroll = 0;
 window.addEventListener("wheel",     () => { lastUserScroll = Date.now(); }, { passive: true });
@@ -580,8 +581,12 @@ document.getElementById("controls").addEventListener("click", e => {
     e.target.dataset.on = state.cats[cat];
     render();
   } else if (day) {
-    state.days[day] = e.target.dataset.on !== "true";
-    e.target.dataset.on = state.days[day];
+    // Tab behavior: select only this day, deselect all others.
+    DAYS.forEach(d => { state.days[d] = false; });
+    state.days[day] = true;
+    document.querySelectorAll(".chip.day").forEach(btn => {
+      btn.dataset.on = (btn.dataset.day === day) ? "true" : "false";
+    });
     render();
   } else if (e.target.id === "now-btn") {
     if (e.target.hasAttribute("disabled")) return;
@@ -645,11 +650,10 @@ metaEl.innerHTML = metaHtml;
 
 buildAIFilter();
 
-if (MEETING_DAY) {
-  document.querySelectorAll(".chip.day").forEach(btn => {
-    btn.dataset.on = (btn.dataset.day === MEETING_DAY) ? "true" : "false";
-  });
-}
+// Set the active day chip to DEFAULT_DAY (= MEETING_DAY if within meeting, else Mon)
+document.querySelectorAll(".chip.day").forEach(btn => {
+  btn.dataset.on = (btn.dataset.day === DEFAULT_DAY) ? "true" : "false";
+});
 
 if (!WITHIN_MEETING) {
   const btn = document.getElementById("now-btn");
