@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -9,23 +9,25 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #f4f4f1;
+    --bg: #f6f5f1;
     --surface: #ffffff;
-    --ink: #1a1a1a;
-    --muted: #6b6b6b;
-    --line: #e2e2dc;
-    --line-strong: #c9c9c2;
-    --now: #d92b2b;
+    --ink: #2a2a2a;
+    --muted: #777775;
+    --line: #e6e5df;
+    --line-strong: #cdccc6;
+    --now: #c54545;
 
-    /* category colors */
-    --cat-6GR:   #2a7a6f;
-    --cat-AI78:  #c2185b;
-    --cat-MAINT: #c97a14;
-    --cat-R20:   #2e5cb8;
+    /* Softer eye-friendly category palette */
+    --cat-6GR:    #5b8a82;
+    --cat-AI78:   #b07a98;
+    --cat-MAINT:  #c39263;
+    --cat-R20:    #6a86b3;
 
-    --row-h: 28px;       /* height per 10 min */
-    --label-w: 64px;     /* time column width */
-    --col-min-w: 200px;  /* min room column width */
+    --row-h: 28px;
+    --label-w: 64px;
+    --col-min-w: 200px;
+
+    --dim-opacity: 0.18;
   }
 
   * { box-sizing: border-box; }
@@ -46,8 +48,20 @@
     position: sticky; top: 0; z-index: 50;
   }
   h1 { margin: 0 0 4px; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
-  .meta { font-size: 11px; color: var(--muted); margin-bottom: 12px; font-family: 'IBM Plex Mono', monospace; }
+  .meta {
+    font-size: 11px; color: var(--muted); margin-bottom: 10px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
   .meta a { color: inherit; }
+  .meta .sep { margin: 0 6px; opacity: 0.6; }
+  .clock {
+    display: inline-block;
+    background: #f0eee8;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-weight: 500;
+    color: var(--ink);
+  }
 
   .controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .chip {
@@ -68,15 +82,27 @@
   .chip.cat[data-cat="AI78"][data-on="true"]  { background: var(--cat-AI78); }
   .chip.cat[data-cat="MAINT"][data-on="true"] { background: var(--cat-MAINT); }
   .chip.cat[data-cat="R20"][data-on="true"]   { background: var(--cat-R20); }
-  .chip.cat[data-on="false"] { opacity: 0.45; }
+  .chip.cat[data-on="false"] { opacity: 0.5; }
 
   .chip.day[data-on="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
   .chip.now { background: var(--now); color: white; border-color: var(--now); }
-  .chip.now:hover { filter: brightness(1.1); }
+  .chip.now:hover { filter: brightness(1.08); }
+  .chip.now[disabled] { background: var(--line-strong); border-color: var(--line-strong); color: var(--muted); cursor: not-allowed; }
 
   .divider { width: 1px; height: 18px; background: var(--line-strong); margin: 0 4px; }
 
   main { padding: 16px 24px 80px; }
+
+  .info-banner {
+    background: #f0eee8;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .info-banner b { color: var(--ink); }
 
   .day-section { margin-bottom: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
   .day-title {
@@ -86,7 +112,7 @@
     font-size: 13px;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    background: #fafaf7;
+    background: #faf9f4;
   }
   .day-title .date { color: var(--muted); font-weight: 400; margin-left: 8px; }
   .day-title .today-badge {
@@ -115,17 +141,14 @@
     font-weight: 600;
     border-bottom: 1px solid var(--line);
     border-left: 1px solid var(--line);
-    background: #fafaf7;
+    background: #faf9f4;
     position: sticky; top: 0;
     text-align: center;
   }
-  .time-head { border-bottom: 1px solid var(--line); background: #fafaf7; }
+  .time-head { border-bottom: 1px solid var(--line); background: #faf9f4; }
 
-  /* time labels */
   .time-col, .room-col { position: relative; }
-  .time-col {
-    border-right: 1px solid var(--line);
-  }
+  .time-col { border-right: 1px solid var(--line); }
   .time-label {
     position: absolute;
     right: 6px;
@@ -134,13 +157,8 @@
     color: var(--muted);
     transform: translateY(-50%);
   }
+  .room-col { border-left: 1px solid var(--line); position: relative; }
 
-  .room-col {
-    border-left: 1px solid var(--line);
-    position: relative;
-  }
-
-  /* hour grid lines */
   .hour-line {
     position: absolute;
     left: 0; right: 0;
@@ -149,18 +167,16 @@
   }
   .hour-line.solid { border-top-style: solid; }
 
-  /* break blocks */
   .break-block {
     position: absolute;
     left: 0; right: 0;
-    background: repeating-linear-gradient(45deg, #f4f4f1, #f4f4f1 4px, #ececde 4px, #ececde 8px);
+    background: repeating-linear-gradient(45deg, #f6f5f1, #f6f5f1 4px, #ecebe2 4px, #ecebe2 8px);
     color: var(--muted);
     font-size: 10px;
     display: flex; align-items: center; justify-content: center;
     pointer-events: none;
   }
 
-  /* session blocks */
   .session {
     position: absolute;
     left: 2px; right: 2px;
@@ -171,19 +187,18 @@
     overflow: hidden;
     cursor: pointer;
     transition: opacity 0.15s, transform 0.05s;
-    border-left: 3px solid rgba(0,0,0,0.25);
+    border-left: 3px solid rgba(0,0,0,0.22);
   }
   .session:hover { transform: translateX(1px); filter: brightness(1.06); }
   .session[data-cat="6GR"]   { background: var(--cat-6GR); }
   .session[data-cat="AI78"]  { background: var(--cat-AI78); }
   .session[data-cat="MAINT"] { background: var(--cat-MAINT); }
   .session[data-cat="R20"]   { background: var(--cat-R20); }
-  .session.dim { opacity: 0.12; }
+  .session.dim { opacity: var(--dim-opacity); }
   .session .s-title { font-weight: 600; }
   .session .s-meta { font-family: 'IBM Plex Mono', monospace; font-size: 10px; opacity: 0.9; }
   .session .s-ai { margin-top: 2px; font-size: 10px; opacity: 0.95; }
 
-  /* NOW line */
   .now-line {
     position: absolute;
     left: 0; right: 0;
@@ -211,7 +226,6 @@
     border-radius: 2px;
   }
 
-  /* filter side panel */
   .panel-toggle {
     position: fixed;
     right: 16px;
@@ -245,9 +259,18 @@
   .panel button.close { background: none; border: none; cursor: pointer; font-size: 18px; }
   .panel .group { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
   .panel label { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; cursor: pointer; }
-  .panel input { accent-color: var(--ink); }
+  .panel input[type="checkbox"] { accent-color: var(--ink); }
 
-  footer { text-align: center; padding: 16px; color: var(--muted); font-size: 11px; }
+  .panel .btn-row { display: flex; gap: 6px; margin-bottom: 10px; }
+  .panel .btn-row .chip { flex: 1; text-align: center; }
+
+  .opacity-control { margin: 10px 0 6px; }
+  .opacity-control label { display: block; padding: 0 0 4px; font-size: 11px; color: var(--muted); }
+  .opacity-control input[type="range"] { width: 100%; accent-color: var(--ink); }
+  .opacity-control .val { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--ink); }
+
+  footer { text-align: center; padding: 16px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+  footer a { color: inherit; }
 </style>
 </head>
 <body>
@@ -279,25 +302,31 @@
     <h2>Session Filter</h2>
     <button class="close" id="panel-close">×</button>
   </div>
-  <button class="chip" id="clear-filter" style="width:100%; margin-bottom:8px;">Clear</button>
-  <div style="font-size:11px; color:var(--muted);">Unchecked items are shown at 12% opacity.</div>
+  <div class="btn-row">
+    <button class="chip" id="select-all">Select all</button>
+    <button class="chip" id="deselect-all">Deselect all</button>
+  </div>
+  <div class="opacity-control">
+    <label>Unchecked opacity: <span class="val" id="opacity-val">18%</span></label>
+    <input type="range" id="opacity-slider" min="0" max="100" step="1" value="18" />
+  </div>
   <div class="group" id="ai-filter-group"></div>
 </aside>
 
-<footer>
-  Built on a fork-friendly template. Edit the <code>scheduleData</code> object in the source to customize.
+<footer id="footer">
+  Auto-generated from 3GPP FTP. For feedback or bug reports:
+  <a href="mailto:jshim@ofinno.com">Jae-Nam Shim &lt;jshim@ofinno.com&gt;</a>
 </footer>
 
 <script>
 /* ============================================================
-   1. DATA — replace this with your meeting's schedule.
-   ============================================================
-   Times are 24h "HH:MM". Category is one of: 6GR, AI78, MAINT, R20.
-*/
+   1. DATA — injected at build time by build.py
+   ============================================================ */
 const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
   "meeting": "RAN1",
-  "source": "(no data yet - run build.py)",
-  "sourceUrl": "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Chair_notes/",
+  "meetingInfo": { "meetingNumber": "", "title": "", "city": "", "startDate": "", "endDate": "", "timezone": "UTC" },
+  "sources": [],
+  "sourceUrls": [],
   "generated": "",
   "rooms": ["Ballroom B (3F)", "Ballroom A (3F)", "Ballroom C (3F)", "Dalian Ballroom 1 (3F)", "Shanghai Function room (3F)"],
   "dayRange": {"start": "08:30", "end": "19:30"},
@@ -310,37 +339,65 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
 } /*END:SCHEDULE_DATA*/;
 
 /* ============================================================
-   2. Rendering
+   2. Constants & time helpers
    ============================================================ */
-const PX_PER_MIN = 28 / 10; // matches --row-h: 28px per 10 min
+const PX_PER_MIN = 28 / 10;
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
+const MEETING_TZ = (scheduleData.meetingInfo && scheduleData.meetingInfo.timezone) || 'UTC';
 
 const toMin = (hhmm) => {
   const [h, m] = hhmm.split(":").map(Number);
   return h * 60 + m;
 };
+const pad2 = (n) => String(n).padStart(2, "0");
 const dayStart = toMin(scheduleData.dayRange.start);
 const dayEnd   = toMin(scheduleData.dayRange.end);
 const totalH = (dayEnd - dayStart) * PX_PER_MIN;
 
+/* Get current date/time as it would be in the meeting city. */
+function meetingNow() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: MEETING_TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    weekday: 'short', hour12: false,
+  }).formatToParts(now);
+  const lookup = {};
+  parts.forEach(p => { lookup[p.type] = p.value; });
+  const ymd = lookup.year + '-' + lookup.month + '-' + lookup.day;
+  const hour = parseInt(lookup.hour, 10);
+  const minute = parseInt(lookup.minute, 10);
+  const wk = (lookup.weekday || '').replace('.', '').slice(0, 3);
+  return { ymd, dayName: wk, minutes: hour * 60 + minute, hour, minute };
+}
+
+function isWithinMeeting() {
+  const mi = scheduleData.meetingInfo || {};
+  if (!mi.startDate || !mi.endDate) return false;
+  const today = meetingNow().ymd;
+  return today >= mi.startDate && today <= mi.endDate;
+}
+
+/* ============================================================
+   3. State
+   ============================================================ */
 const state = {
   cats:  { "6GR": true, "AI78": true, "MAINT": true, "R20": true },
   days:  Object.fromEntries(DAYS.map(d => [d, true])),
-  aiFilter: {}, // AI id → boolean (true = visible). default true.
+  aiFilter: {},
 };
 
-// Detect today's day-of-week and auto-focus that day if it's Mon–Fri.
-// On weekends, show all days.
-const TODAY_DAY = (() => {
-  const idx = (new Date().getDay() + 6) % 7; // Mon=0..Sun=6
-  return idx <= 4 ? DAYS[idx] : null;
+const WITHIN_MEETING = isWithinMeeting();
+const MEETING_DAY = (() => {
+  if (!WITHIN_MEETING) return null;
+  const d = meetingNow().dayName;
+  return DAYS.includes(d) ? d : null;
 })();
-if (TODAY_DAY) {
-  DAYS.forEach(d => { state.days[d] = (d === TODAY_DAY); });
+if (MEETING_DAY) {
+  DAYS.forEach(d => { state.days[d] = (d === MEETING_DAY); });
 }
 
-// Track whether the user has scrolled manually in the last 20 seconds.
-// If so, suppress auto-scroll-to-NOW so we don't yank them around.
 let lastUserScroll = 0;
 window.addEventListener("wheel",     () => { lastUserScroll = Date.now(); }, { passive: true });
 window.addEventListener("touchmove", () => { lastUserScroll = Date.now(); }, { passive: true });
@@ -348,54 +405,71 @@ window.addEventListener("keydown", (e) => {
   if (["PageDown","PageUp","ArrowUp","ArrowDown","Home","End"," "].includes(e.key)) lastUserScroll = Date.now();
 });
 
+/* ============================================================
+   4. Rendering
+   ============================================================ */
 function render() {
   const main = document.getElementById("main");
   main.innerHTML = "";
+
+  // Out-of-meeting banner
+  if (!WITHIN_MEETING && scheduleData.meetingInfo && scheduleData.meetingInfo.startDate) {
+    const mi = scheduleData.meetingInfo;
+    const banner = document.createElement("div");
+    banner.className = "info-banner";
+    const today = meetingNow().ymd;
+    let msg;
+    if (today < mi.startDate) {
+      msg = '<b>' + (mi.title || scheduleData.meeting) + '</b> hasn\u2019t started yet \u2014 ' +
+            'runs ' + mi.startDate + ' to ' + mi.endDate + ' in ' + (mi.city || '?') +
+            '. The schedule below is a preview; the "NOW" indicator is hidden until the meeting begins.';
+    } else {
+      msg = '<b>' + (mi.title || scheduleData.meeting) + '</b> has ended (' +
+            mi.startDate + ' \u2013 ' + mi.endDate + ', ' + (mi.city || '?') +
+            '). Shown for reference; the "NOW" indicator is hidden.';
+    }
+    banner.innerHTML = msg;
+    main.appendChild(banner);
+  }
 
   DAYS.forEach(day => {
     if (!state.days[day]) return;
     const daySessions = scheduleData.sessions.filter(s => s.day === day);
     const section = document.createElement("section");
     section.className = "day-section";
-    section.innerHTML = `
-      <div class="day-title">${day}${day === TODAY_DAY ? ' <span class="today-badge">TODAY</span>' : ''}<span class="date"></span></div>
-      <div class="grid-wrap"><div class="grid" style="--n-rooms:${scheduleData.rooms.length}"></div></div>
-    `;
+    section.innerHTML =
+      '<div class="day-title">' + day +
+      (day === MEETING_DAY ? ' <span class="today-badge">TODAY</span>' : '') +
+      '<span class="date"></span></div>' +
+      '<div class="grid-wrap"><div class="grid" style="--n-rooms:' + scheduleData.rooms.length + '"></div></div>';
     const grid = section.querySelector(".grid");
 
-    // headers
     const empty = document.createElement("div"); empty.className = "time-head"; grid.appendChild(empty);
     scheduleData.rooms.forEach(r => {
       const h = document.createElement("div"); h.className = "room-head"; h.textContent = r; grid.appendChild(h);
     });
 
-    // time column + room columns
     const timeCol = document.createElement("div");
     timeCol.className = "time-col";
     timeCol.style.height = totalH + "px";
     timeCol.style.gridColumn = "1";
     grid.appendChild(timeCol);
 
-    // half-hour ticks
     for (let m = dayStart; m <= dayEnd; m += 30) {
       const top = (m - dayStart) * PX_PER_MIN;
       const label = document.createElement("div");
       label.className = "time-label";
-      const hh = String(Math.floor(m / 60)).padStart(2, "0");
-      const mm = String(m % 60).padStart(2, "0");
-      label.textContent = `${hh}:${mm}`;
+      label.textContent = pad2(Math.floor(m / 60)) + ":" + pad2(m % 60);
       label.style.top = top + "px";
       timeCol.appendChild(label);
     }
 
-    // room columns
     const roomCols = scheduleData.rooms.map((_, idx) => {
       const c = document.createElement("div");
       c.className = "room-col";
       c.style.height = totalH + "px";
       c.style.gridColumn = (idx + 2).toString();
       grid.appendChild(c);
-      // hour lines
       for (let m = dayStart; m <= dayEnd; m += 30) {
         const top = (m - dayStart) * PX_PER_MIN;
         const ln = document.createElement("div");
@@ -403,7 +477,6 @@ function render() {
         ln.style.top = top + "px";
         c.appendChild(ln);
       }
-      // breaks
       scheduleData.breaks.forEach(br => {
         const top = (toMin(br.start) - dayStart) * PX_PER_MIN;
         const h = (toMin(br.end) - toMin(br.start)) * PX_PER_MIN;
@@ -417,7 +490,6 @@ function render() {
       return c;
     });
 
-    // sessions
     daySessions.forEach(s => {
       const top = (toMin(s.start) - dayStart) * PX_PER_MIN;
       const h   = (toMin(s.end) - toMin(s.start)) * PX_PER_MIN;
@@ -428,32 +500,31 @@ function render() {
       div.style.top = top + "px";
       div.style.height = (h - 2) + "px";
       const dur = toMin(s.end) - toMin(s.start);
-      div.innerHTML = `
-        <div class="s-title">${s.title}${s.host ? ` <span style="opacity:.8;font-weight:400">· ${s.host}</span>` : ""}</div>
-        <div class="s-meta">${s.start}–${s.end} (${dur}m)</div>
-        <div class="s-ai">${s.ai}</div>
-      `;
-      div.title = `${s.title}\n${s.ai}\n${s.start}–${s.end}${s.host ? "\n" + s.host : ""}`;
-      // dim if filtered out
+      div.innerHTML =
+        '<div class="s-title">' + s.title +
+        (s.host ? ' <span style="opacity:.8;font-weight:400">\u00b7 ' + s.host + '</span>' : '') +
+        '</div>' +
+        '<div class="s-meta">' + s.start + '\u2013' + s.end + ' (' + dur + 'm)</div>' +
+        '<div class="s-ai">' + s.ai + '</div>';
+      div.title = s.title + '\n' + s.ai + '\n' + s.start + '\u2013' + s.end + (s.host ? '\n' + s.host : '');
       const catOn = state.cats[s.category];
       const aiOn = state.aiFilter[s.ai] !== false;
       if (!catOn || !aiOn) div.classList.add("dim");
       roomCols[s.room].appendChild(div);
     });
 
-    // now line
-    drawNowLine(roomCols, day);
+    if (WITHIN_MEETING) drawNowLine(roomCols, day);
 
     main.appendChild(section);
   });
+
+  updateHeaderClock();
 }
 
 function drawNowLine(roomCols, day) {
-  const now = new Date();
-  const dayIdx = (now.getDay() + 6) % 7; // Mon=0 .. Sun=6
-  const dayName = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][dayIdx];
-  if (dayName !== day) return;
-  const mins = now.getHours() * 60 + now.getMinutes();
+  const mn = meetingNow();
+  if (mn.dayName !== day) return;
+  const mins = mn.minutes;
   if (mins < dayStart || mins > dayEnd) return;
   const top = (mins - dayStart) * PX_PER_MIN;
   roomCols.forEach((c, i) => {
@@ -463,11 +534,19 @@ function drawNowLine(roomCols, day) {
     if (i === roomCols.length - 1) {
       const lbl = document.createElement("div");
       lbl.className = "now-label";
-      lbl.textContent = `NOW ${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
+      lbl.textContent = "NOW " + pad2(mn.hour) + ":" + pad2(mn.minute);
       line.appendChild(lbl);
     }
     c.appendChild(line);
   });
+}
+
+function updateHeaderClock() {
+  const el = document.getElementById("clock-text");
+  if (!el) return;
+  const mn = meetingNow();
+  const tzLabel = MEETING_TZ.replace(/^.*\//, '').replace(/_/g, ' ');
+  el.textContent = pad2(mn.hour) + ":" + pad2(mn.minute) + " " + tzLabel;
 }
 
 function buildAIFilter() {
@@ -477,7 +556,8 @@ function buildAIFilter() {
   grp.innerHTML = "<div style='font-size:11px;color:var(--muted);margin-bottom:6px;'>AGENDA ITEMS</div>";
   ais.forEach(ai => {
     const lbl = document.createElement("label");
-    lbl.innerHTML = `<input type="checkbox" ${state.aiFilter[ai] ? "checked" : ""} data-ai="${ai}"> <span>${ai}</span>`;
+    lbl.innerHTML = '<input type="checkbox" ' + (state.aiFilter[ai] ? "checked" : "") +
+                    ' data-ai="' + ai + '"> <span>' + ai + '</span>';
     grp.appendChild(lbl);
   });
   grp.addEventListener("change", e => {
@@ -489,7 +569,7 @@ function buildAIFilter() {
 }
 
 /* ============================================================
-   3. Wiring
+   5. Wiring
    ============================================================ */
 document.getElementById("controls").addEventListener("click", e => {
   if (!e.target.matches(".chip")) return;
@@ -504,7 +584,7 @@ document.getElementById("controls").addEventListener("click", e => {
     e.target.dataset.on = state.days[day];
     render();
   } else if (e.target.id === "now-btn") {
-    // scroll to today's NOW line
+    if (e.target.hasAttribute("disabled")) return;
     render();
     setTimeout(() => {
       const line = document.querySelector(".now-line");
@@ -519,58 +599,86 @@ document.getElementById("panel-toggle").addEventListener("click", () => {
 document.getElementById("panel-close").addEventListener("click", () => {
   document.getElementById("panel").classList.remove("open");
 });
-document.getElementById("clear-filter").addEventListener("click", () => {
+document.getElementById("select-all").addEventListener("click", () => {
   Object.keys(state.aiFilter).forEach(k => state.aiFilter[k] = true);
   document.querySelectorAll("#ai-filter-group input").forEach(i => i.checked = true);
   render();
 });
-
+document.getElementById("deselect-all").addEventListener("click", () => {
+  Object.keys(state.aiFilter).forEach(k => state.aiFilter[k] = false);
+  document.querySelectorAll("#ai-filter-group input").forEach(i => i.checked = false);
+  render();
+});
+document.getElementById("opacity-slider").addEventListener("input", (e) => {
+  const pct = parseInt(e.target.value, 10);
+  document.documentElement.style.setProperty('--dim-opacity', (pct / 100).toFixed(2));
+  document.getElementById("opacity-val").textContent = pct + "%";
+});
 
 // Populate title + meta from data
 document.getElementById("title").textContent = "\ud83d\udcc5 " + (scheduleData.meeting || "Schedule");
-document.title = (scheduleData.meeting || "Schedule") + " - Schedule";
+document.title = (scheduleData.meeting || "Schedule") + " \u2014 Schedule";
+
 const metaEl = document.getElementById("meta");
-if (scheduleData.source && scheduleData.sourceUrl) {
-  metaEl.innerHTML = 'Source: <a href="' + scheduleData.sourceUrl + '" target="_blank" rel="noopener">' +
-    scheduleData.source + '</a>' +
-    (scheduleData.generated ? ' \u00b7 Updated: ' + scheduleData.generated : '');
-} else {
-  metaEl.textContent = scheduleData.source || '';
+const mi = scheduleData.meetingInfo || {};
+let metaHtml = '';
+if (mi.city || mi.startDate) {
+  metaHtml += '<b style="font-weight:500;color:var(--ink);">' + (mi.city || '') + '</b>';
+  if (mi.startDate && mi.endDate) {
+    metaHtml += ' <span style="opacity:.8">(' + mi.startDate + ' \u2192 ' + mi.endDate + ')</span>';
+  }
+  metaHtml += '<span class="sep">\u00b7</span>';
 }
+metaHtml += 'Now: <span class="clock" id="clock-text">\u2026</span>';
+if (scheduleData.sources && scheduleData.sources.length) {
+  metaHtml += '<span class="sep">\u00b7</span>Sources: ';
+  metaHtml += scheduleData.sources.map((fn, i) => {
+    const url = scheduleData.sourceUrls[i] || '#';
+    const shown = fn.length > 40 ? fn.slice(0, 37) + '\u2026' : fn;
+    return '<a href="' + url + '" target="_blank" rel="noopener">' + shown + '</a>';
+  }).join(', ');
+}
+if (scheduleData.generated) {
+  metaHtml += '<span class="sep">\u00b7</span>Updated: ' + scheduleData.generated;
+}
+metaEl.innerHTML = metaHtml;
 
 buildAIFilter();
 
-// Reflect TODAY_DAY in the day chips (so the toggle state matches state.days)
-if (TODAY_DAY) {
+if (MEETING_DAY) {
   document.querySelectorAll(".chip.day").forEach(btn => {
-    btn.dataset.on = (btn.dataset.day === TODAY_DAY) ? "true" : "false";
+    btn.dataset.on = (btn.dataset.day === MEETING_DAY) ? "true" : "false";
   });
+}
+
+if (!WITHIN_MEETING) {
+  const btn = document.getElementById("now-btn");
+  btn.setAttribute("disabled", "");
+  btn.title = "NOW indicator is only available during meeting dates";
 }
 
 render();
 
-// Scroll to NOW on initial load (or to morning if NOW isn't in range)
 function scrollToNowOrTop() {
-  const line = document.querySelector(".now-line");
-  if (line) {
-    line.scrollIntoView({ behavior: "smooth", block: "center" });
-  } else {
-    // No NOW line (off-hours or non-meeting day) — scroll to top of first visible day
-    const first = document.querySelector(".day-section");
-    if (first) first.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (WITHIN_MEETING) {
+    const line = document.querySelector(".now-line");
+    if (line) {
+      line.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
   }
+  const first = document.querySelector(".day-section");
+  if (first) first.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 setTimeout(scrollToNowOrTop, 100);
 
-// Every minute: re-render to update NOW position, and gently auto-scroll
-// to follow NOW — but ONLY if the user hasn't scrolled in the last 20 seconds.
 setInterval(() => {
   render();
-  if (Date.now() - lastUserScroll > 20_000) {
+  if (WITHIN_MEETING && Date.now() - lastUserScroll > 20000) {
     const line = document.querySelector(".now-line");
     if (line) line.scrollIntoView({ behavior: "smooth", block: "center" });
   }
-}, 60_000);
+}, 60000);
 </script>
 </body>
 </html>
