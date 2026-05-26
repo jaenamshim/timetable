@@ -342,7 +342,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
     "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Hiroki_notes/RAN1%23125%20schedule%20for%20Hiroki%20Adhoc2%20sessions_v04_9.docx",
     "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Sorour_notes/RAN1%23125%20Sorour%20online%20and%20offline%20schedules%20-%20v00.docx"
   ],
-  "generated": "2026-05-26 20:45 UTC",
+  "generated": "2026-05-26 20:47 UTC",
   "rooms": [
     "Ballroom B (3F)",
     "Ballroom A (3F)",
@@ -2651,7 +2651,8 @@ function isWithinMeeting() {
    ============================================================ */
 const state = {
   cats:  { "6GR": true, "AI78": true, "MAINT": true, "R20": true },
-  days:  Object.fromEntries(DAYS.map(d => [d, true])),
+  // Days behave like tabs: exactly one day is shown at a time.
+  days:  Object.fromEntries(DAYS.map(d => [d, false])),
   aiFilter: {},
 };
 
@@ -2661,9 +2662,9 @@ const MEETING_DAY = (() => {
   const d = meetingNow().dayName;
   return DAYS.includes(d) ? d : null;
 })();
-if (MEETING_DAY) {
-  DAYS.forEach(d => { state.days[d] = (d === MEETING_DAY); });
-}
+// Default selected day: today (if within meeting), otherwise Monday.
+const DEFAULT_DAY = MEETING_DAY || 'Mon';
+state.days[DEFAULT_DAY] = true;
 
 let lastUserScroll = 0;
 window.addEventListener("wheel",     () => { lastUserScroll = Date.now(); }, { passive: true });
@@ -2847,8 +2848,12 @@ document.getElementById("controls").addEventListener("click", e => {
     e.target.dataset.on = state.cats[cat];
     render();
   } else if (day) {
-    state.days[day] = e.target.dataset.on !== "true";
-    e.target.dataset.on = state.days[day];
+    // Tab behavior: select only this day, deselect all others.
+    DAYS.forEach(d => { state.days[d] = false; });
+    state.days[day] = true;
+    document.querySelectorAll(".chip.day").forEach(btn => {
+      btn.dataset.on = (btn.dataset.day === day) ? "true" : "false";
+    });
     render();
   } else if (e.target.id === "now-btn") {
     if (e.target.hasAttribute("disabled")) return;
@@ -2912,11 +2917,10 @@ metaEl.innerHTML = metaHtml;
 
 buildAIFilter();
 
-if (MEETING_DAY) {
-  document.querySelectorAll(".chip.day").forEach(btn => {
-    btn.dataset.on = (btn.dataset.day === MEETING_DAY) ? "true" : "false";
-  });
-}
+// Set the active day chip to DEFAULT_DAY (= MEETING_DAY if within meeting, else Mon)
+document.querySelectorAll(".chip.day").forEach(btn => {
+  btn.dataset.on = (btn.dataset.day === DEFAULT_DAY) ? "true" : "false";
+});
 
 if (!WITHIN_MEETING) {
   const btn = document.getElementById("now-btn");
