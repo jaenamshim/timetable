@@ -25,8 +25,8 @@
     --cat-R20:    #3d6299;  /* navy blue */
 
     --row-h: 28px;
-    --label-w: 64px;
-    --col-min-w: 200px;
+    --label-w: 56px;
+    --col-min-w: 96px;
 
     --dim-opacity: 0.18;
   }
@@ -137,7 +137,7 @@
     min-width: 100%;
   }
   .room-head {
-    padding: 8px 8px;
+    padding: 8px 6px;
     font-size: 11px;
     font-weight: 600;
     border-bottom: 1px solid var(--line);
@@ -145,6 +145,9 @@
     background: #faf9f4;
     position: sticky; top: 0;
     text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .time-head { border-bottom: 1px solid var(--line); background: #faf9f4; }
 
@@ -272,6 +275,27 @@
 
   footer { text-align: center; padding: 16px; color: var(--muted); font-size: 11px; line-height: 1.6; }
   footer a { color: inherit; }
+
+  /* Mobile: tighter columns + vertical density so the table fits the phone
+     with much less horizontal scrolling. */
+  @media (max-width: 768px) {
+    :root {
+      --row-h: 22px;
+      --label-w: 44px;
+      --col-min-w: 80px;
+    }
+    header { padding: 12px 12px 10px; }
+    h1 { font-size: 17px; }
+    .meta { font-size: 10px; }
+    main { padding: 10px 12px 60px; }
+    .room-head { font-size: 10px; padding: 6px 4px; }
+    .time-label { font-size: 9px; }
+    .session { font-size: 10px; padding: 3px 5px; }
+    .session .s-meta { font-size: 9px; }
+    .session .s-ai { font-size: 9px; }
+    .chip { padding: 4px 9px; font-size: 11px; }
+    .panel { width: 280px; }
+  }
 </style>
 </head>
 <body>
@@ -342,7 +366,12 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
 /* ============================================================
    2. Constants & time helpers
    ============================================================ */
-const PX_PER_MIN = 28 / 10;
+/* PX_PER_MIN is derived from the CSS variable --row-h so that the mobile
+   media query (which reduces --row-h to 22px) takes effect without needing
+   to ship a separate JS constant. */
+const getPxPerMin = () => parseFloat(
+  getComputedStyle(document.documentElement).getPropertyValue('--row-h')
+) / 10;
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
 const MEETING_TZ = (scheduleData.meetingInfo && scheduleData.meetingInfo.timezone) || 'UTC';
 
@@ -353,7 +382,6 @@ const toMin = (hhmm) => {
 const pad2 = (n) => String(n).padStart(2, "0");
 const dayStart = toMin(scheduleData.dayRange.start);
 const dayEnd   = toMin(scheduleData.dayRange.end);
-const totalH = (dayEnd - dayStart) * PX_PER_MIN;
 
 /* Get current date/time as it would be in the meeting city. */
 function meetingNow() {
@@ -413,6 +441,10 @@ window.addEventListener("keydown", (e) => {
 function render() {
   const main = document.getElementById("main");
   main.innerHTML = "";
+
+  // Recompute per render — values come from CSS so mobile media query takes effect.
+  const PX_PER_MIN = getPxPerMin();
+  const totalH = (dayEnd - dayStart) * PX_PER_MIN;
 
   // Out-of-meeting banner
   if (!WITHIN_MEETING && scheduleData.meetingInfo && scheduleData.meetingInfo.startDate) {
@@ -515,7 +547,7 @@ function render() {
       roomCols[s.room].appendChild(div);
     });
 
-    if (WITHIN_MEETING) drawNowLine(roomCols, day);
+    if (WITHIN_MEETING) drawNowLine(roomCols, day, PX_PER_MIN);
 
     main.appendChild(section);
   });
@@ -523,7 +555,7 @@ function render() {
   updateHeaderClock();
 }
 
-function drawNowLine(roomCols, day) {
+function drawNowLine(roomCols, day, PX_PER_MIN) {
   const mn = meetingNow();
   if (mn.dayName !== day) return;
   const mins = mn.minutes;
@@ -684,6 +716,14 @@ setInterval(() => {
     if (line) line.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 }, 60000);
+
+// Re-render on viewport changes (rotation, mobile/desktop breakpoint crossings)
+// so the layout picks up the new CSS variable values.
+let _resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(render, 150);
+});
 </script>
 </body>
 </html>
