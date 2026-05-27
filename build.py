@@ -619,6 +619,36 @@ def parse_hiroki_cell(cell, period_start, period_end):
     sessions = []
     cursor = period_start
     cat_label = None
+    # Pending "bold-with-duration" block — declares a span of N minutes that
+    # the following italic paragraph(s) describe. Each italic-with-its-own-
+    # duration consumes from this budget; a comma-list italic (e.g.
+    # "10.5.4.3(45), 10.5.4.1(45)") uses the WHOLE remaining budget as one
+    # session with the bold label as title and the italic as ai text.
+    pending_label = None
+    pending_remaining = 0
+
+    def emit(title, ai_text, dur, cat_hint):
+        nonlocal cursor
+        d = min(dur, period_end - cursor)
+        if d <= 0:
+            return
+        sessions.append({
+            'start': to_hhmm(cursor),
+            'end':   to_hhmm(cursor + d),
+            'title': title,
+            'ai':    ai_text if ai_text else ('AI ' + (title.split()[0] if title else '')),
+            'category': fuzzy_category(cat_hint or title),
+            'host':  'Hiroki',
+        })
+        cursor += d
+
+    def flush_pending():
+        nonlocal pending_label, pending_remaining
+        if pending_label is not None and pending_remaining > 0:
+            emit(pending_label, None, pending_remaining, pending_label)
+        pending_label = None
+        pending_remaining = 0
+
     for text, is_bold, is_italic in paras:
         low = text.lower()
         if any(k in low for k in ('commences', 'expected to close', 'no exceptions',
@@ -627,54 +657,48 @@ def parse_hiroki_cell(cell, period_start, period_end):
             continue
         if cursor >= period_end:
             break
+
+        if is_bold and not is_italic:
+            flush_pending()
+            m = PAT_WITH_DUR.match(text)
+            if m:
+                try:
+                    pending_label = m.group(1).strip().rstrip('.').strip()
+                    pending_remaining = int(m.group(2))
+                except ValueError:
+                    pending_label = None
+                    pending_remaining = 0
+            else:
+                cat_label = text
+            continue
+
+        # Italic or plain prose (not pure bold).
         m = PAT_WITH_DUR.match(text)
-        if m:
-            label = m.group(1).strip().rstrip('.').strip()
+        if m and ',' not in text:
+            # Standalone italic-with-duration sub-session. Consumes from any
+            # pending bold-block budget.
             try:
+                label = m.group(1).strip().rstrip('.').strip()
                 dur = int(m.group(2))
             except ValueError:
                 continue
-            if is_bold and not is_italic:
-                cat_label = label
-                continue
-            else:
-                if cursor + dur > period_end:
-                    dur = max(0, period_end - cursor)
-                if dur <= 0:
-                    break
-                title = label.lstrip('.').strip()
-                ai_label = title
-                if not ai_label.lower().startswith('ai'):
-                    ai_label = 'AI ' + (title.split()[0] if title else '')
-                sessions.append({
-                    'start': to_hhmm(cursor),
-                    'end':   to_hhmm(cursor + dur),
-                    'title': title,
-                    'ai':    ai_label,
-                    'category': fuzzy_category(cat_label or title),
-                    'host':  'Hiroki',
-                })
-                cursor += dur
+            title = label.lstrip('.').strip()
+            emit(title, title, dur, pending_label or cat_label or title)
+            if pending_label is not None:
+                pending_remaining = max(0, pending_remaining - dur)
         else:
-            if is_bold and not is_italic:
-                cat_label = text
+            # Multi-item or no-duration italic. Use pending bold's full
+            # remaining budget if any; otherwise consume rest of period.
+            if pending_label is not None and pending_remaining > 0:
+                emit(pending_label, text, pending_remaining, pending_label)
+                pending_label = None
+                pending_remaining = 0
             else:
-                dur = max(0, period_end - cursor)
-                if dur > 0:
-                    title = text.lstrip('.').strip()
-                    ai_label = title
-                    if not ai_label.lower().startswith('ai'):
-                        ai_label = 'AI ' + (title.split()[0] if title else '')
-                    sessions.append({
-                        'start': to_hhmm(cursor),
-                        'end':   to_hhmm(cursor + dur),
-                        'title': title,
-                        'ai':    ai_label,
-                        'category': fuzzy_category(cat_label or title),
-                        'host':  'Hiroki',
-                    })
-                    cursor = period_end
+                title = text.lstrip('.').strip()
+                emit(title, title, period_end - cursor, cat_label or title)
                 break
+
+    flush_pending()
     return sessions
 
 def parse_hiroki_offline_cell(cell, period_start, period_end):
@@ -804,19 +828,16 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
                 return i
         return None
 
-    # Online overrides: previously we DROPPED main's Ballroom A sessions
-    # whenever Sorour had any A content for the same (day, period), and same
-    # for Ballroom C vs Hiroki. That lost info when Sorour/Hiroki's notes
-    # were less detailed than main's (e.g. main Friday Ballroom A has
-    # "...Sweep 6GR .10.3.1" but Sorour omits the .10.3.1). Now we KEEP
-    # main's sessions and rely on (day, room, start, end) dedup at the end
-    # to absorb exact duplicates while preserving the union of info.
-    for s in main_sessions:
+    # Insertion order matters for the (day, room, start, end) dedup at the
+    # end — the FIRST occurrence of a key wins. Add Hiroki online (Ballroom C)
+    # and Sorour Ballroom A sessions BEFORE main_sessions so their detailed
+    # titles/AI items take precedence over main's terser generic copies.
+    for s in hiroki_data['online']:
         out.append(s)
     for s in sorour_sessions:
         if s['room'] == 'Ballroom A (3F)':
             out.append(s)
-    for s in hiroki_data['online']:
+    for s in main_sessions:
         out.append(s)
 
     # (period_intervals + find_period_idx already defined above.)
