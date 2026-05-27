@@ -50,16 +50,12 @@
     font-size: 13px;
     line-height: 1.35;
     -webkit-font-smoothing: antialiased;
-    /* Stop iOS Safari from rubber-banding the page vertically when the
-       user scrolls horizontally within a table. */
-    overscroll-behavior-y: contain;
   }
 
   header {
     padding: 18px 24px 12px;
     border-bottom: 1px solid var(--line);
     background: var(--surface);
-    position: sticky; top: 0; z-index: 50;
   }
   h1 { margin: 0 0 4px; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
   .meta {
@@ -144,11 +140,6 @@
 
   .grid-wrap {
     overflow-x: auto;
-    /* Smooth momentum scrolling on iOS Safari and contain the rubber-band so
-       the table doesn't pull the whole page sideways. */
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-x: contain;
-    touch-action: pan-x pan-y;
   }
   .grid {
     display: grid;
@@ -790,10 +781,16 @@ setInterval(() => {
   location.reload();
 }, 30 * 60 * 1000);
 
-// Re-render on viewport changes (rotation, mobile/desktop breakpoint crossings)
-// so the layout picks up the new CSS variable values.
+// Re-render on viewport WIDTH changes (rotation, mobile/desktop breakpoint
+// crossings). We deliberately ignore height-only changes because iOS Safari
+// fires a resize event every time the address bar collapses or expands during
+// scroll — re-rendering then would reflow the grid mid-scroll and feel like
+// the page is bouncing back to where it was.
 let _resizeTimer;
+let _lastWidth = window.innerWidth;
 window.addEventListener('resize', () => {
+  if (window.innerWidth === _lastWidth) return;
+  _lastWidth = window.innerWidth;
   clearTimeout(_resizeTimer);
   _resizeTimer = setTimeout(render, 150);
 });
