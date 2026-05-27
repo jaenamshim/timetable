@@ -36,6 +36,29 @@ CAT_MAP = {
     'AI 7/8': 'AI78', 'AI 8': 'AI78', 'AI 9': 'AI78', 'AI/ML': 'AI78',
     'Maintenance': 'MAINT', 'MNTC': 'MAINT',
 }
+# Normalized lookup table — docx labels often have stray spaces ("R 20",
+# "M aintenance") that don't match the canonical CATEGORIES set directly.
+_CAT_NORM = {re.sub(r'\s+', '', c).upper(): c for c in CATEGORIES}
+def normalize_category(s):
+    """Return canonical category name (e.g. 'R20') if `s` matches one of
+    CATEGORIES up to whitespace and case; else None."""
+    if not s:
+        return None
+    return _CAT_NORM.get(re.sub(r'\s+', '', s).upper())
+
+def extract_ai_label(title):
+    """Return 'AI X.Y' style AI item extracted from a session title. Order:
+    explicit 'AI X.Y' in the title; leading digit.digit; first-word fallback."""
+    if not title:
+        return title
+    m = re.search(r'\bAI\s+(\d+(?:\.\d+)*(?:/\d+(?:\.\d+)*)?)', title, re.IGNORECASE)
+    if m:
+        return 'AI ' + m.group(1)
+    m = re.search(r'\b(\d+\.\d+(?:\.\d+)*)', title)
+    if m:
+        return 'AI ' + m.group(1)
+    first = title.split()[0] if title.split() else title
+    return 'AI ' + first
 PERIODS_BY_INDEX = {
     0: ('08:30', '10:30'),
     1: ('11:00', '13:00'),
@@ -232,8 +255,18 @@ def cell_text_lines(cell):
     for p in cell.findall('.//w:p', NS):
         runs = [t.text for t in p.findall('.//w:t', NS) if t.text]
         line = ''.join(runs).strip()
-        if line:
-            lines.append(line)
+        if not line:
+            continue
+        # docx authors sometimes glue items together without whitespace,
+        # e.g. "MIMO (60)AI/ML (60)" or "10.3.2 Modulation (60) R20 (30)".
+        # Insert a newline after any "(NN)" duration marker when followed by
+        # a letter (with optional whitespace) — so each duration-bearing item
+        # becomes its own line.
+        marked = re.sub(r'(\(\d{1,3}\))\s*(?=[A-Za-z])', r'\1\n', line)
+        for sl in marked.split('\n'):
+            sl = sl.strip()
+            if sl:
+                lines.append(sl)
     return lines
 
 def cell_span(cell):
@@ -397,10 +430,11 @@ def parse_main_cell(lines, period_start, period_end):
                 if label in HOSTS:
                     host = label
                     continue
-                if label in CATEGORIES:
+                canon_cat = normalize_category(label)
+                if canon_cat is not None:
                     cursor = flush(cursor)
-                    cat = label
-                    pending[0] = label; pending[1] = dur; pending[2] = False
+                    cat = canon_cat
+                    pending[0] = canon_cat; pending[1] = dur; pending[2] = False
                     continue
                 session_label = label.lstrip('.').strip()
                 if extra_label_parts:
@@ -413,7 +447,7 @@ def parse_main_cell(lines, period_start, period_end):
                 sessions.append({
                     'start': to_hhmm(cursor), 'end': to_hhmm(cursor + dur),
                     'title': session_label,
-                    'ai': 'AI ' + session_label.split()[0] if session_label else session_label,
+                    'ai': extract_ai_label(session_label),
                     'category': CAT_MAP.get(cat, 'R20'),
                     'host': host,
                 })
@@ -421,52 +455,73 @@ def parse_main_cell(lines, period_start, period_end):
                 if pending[0]:
                     pending[2] = True
             else:
-                if sub in CATEGORIES:
-                    cursor = flush(cursor); cat = sub
+                canon_cat = normalize_category(sub)
+                if canon_cat is not None:
+                    cursor = flush(cursor); cat = canon_cat
                 elif sub in HOSTS:
                     host = sub
                 else:
                     sub_stripped = sub.lstrip('.').strip()
                     if re.match(r'^\d+(\.\d+)+', sub_stripped):
-                        # Bare AI item — claim remaining time of the (possibly
-                        # extended) period.
+                        # Bare AI item — claim 60 min by default (or whatever
+                        # remains if less). If there are more bare items after,
+                        # they'll claim their own 60-min slots.
                         cursor = flush(cursor)
                         remaining = effective_end - cursor
                         if remaining > 0:
+                            dur = min(60, remaining)
                             title = sub_stripped
                             if extra_label_parts:
                                 title = ' '.join(extra_label_parts) + ' ' + title
                                 extra_label_parts = []
                             sessions.append({
                                 'start': to_hhmm(cursor),
-                                'end':   to_hhmm(effective_end),
+                                'end':   to_hhmm(cursor + dur),
                                 'title': title,
-                                'ai':    'AI ' + (sub_stripped.split()[0] if sub_stripped else sub_stripped),
+                                'ai':    extract_ai_label(title),
                                 'category': CAT_MAP.get(cat, 'R20'),
                                 'host':  host,
                             })
-                            cursor = effective_end
+                            cursor += dur
                     else:
-                        # Plain prose like "Sweep" or "Any other open issues" —
-                        # buffer for the next session's title or, if no session
-                        # follows, the closing-remarks fallback below.
+                        # Plain prose like "Sweep" or "6GR check points" —
+                        # buffer for the next session's title or, if no
+                        # session follows, the leftover-prose fallback below.
                         extra_label_parts.append(sub)
     cursor = flush(cursor)
 
+    # Trailing-prose fallback: leftover bare labels not yet attached to any
+    # session AND there's leftover time in the period — emit one final
+    # session with the prose as title (e.g. "6GR check points" 12:00-13:00).
+    if extra_label_parts and cursor < effective_end:
+        title = ' '.join(extra_label_parts).strip()
+        if title.lower() != 'tbd':
+            sessions.append({
+                'start': to_hhmm(cursor),
+                'end':   to_hhmm(effective_end),
+                'title': title,
+                'ai':    extract_ai_label(title),
+                'category': CAT_MAP.get(cat, 'R20'),
+                'host':  host,
+            })
+            cursor = effective_end
+        extra_label_parts = []
+
     # Closing-remarks fallback: cell has only prose (no duration/AI items),
     # e.g. Friday "Any other open issues... expected to close at 17:00".
-    # Emit ONE session over the full (effective_start, effective_end) range,
-    # combining the prose into the title.
+    # Skip empty-placeholder text ("TBD", "To be assigned by ...") since
+    # those don't represent real scheduled sessions.
     if not sessions and extra_label_parts:
         title = ' '.join(extra_label_parts).strip()
-        sessions.append({
-            'start': to_hhmm(effective_start),
-            'end':   to_hhmm(effective_end),
-            'title': title,
-            'ai':    'Closing',
-            'category': CAT_MAP.get(cat, 'R20'),
-            'host':  host,
-        })
+        if title.lower().strip() != 'tbd':
+            sessions.append({
+                'start': to_hhmm(effective_start),
+                'end':   to_hhmm(effective_end),
+                'title': title,
+                'ai':    'Closing',
+                'category': CAT_MAP.get(cat, 'R20'),
+                'host':  host,
+            })
     cursor = flush(cursor)
 
     # If we detected "Agenda items..." but had no other sessions, emit it as
@@ -581,7 +636,7 @@ def parse_main_docx(docx_bytes):
         parse_main_cell)
     offline = parse_main_table(
         tables[1], offline_day_cols,
-        lambda d, o: offline_rooms[min(o, 1)],
+        parse_main_docx_room_for_offline,
         parse_main_cell)
     return online + offline
 
@@ -608,9 +663,34 @@ def parse_sorour_docx(docx_bytes):
         parse_sorour_cell)
     offline = parse_main_table(
         tables[1], offline_day_cols,
-        lambda d, o: offline_rooms[min(o, 1)],
+        parse_main_docx_room_for_offline,
         parse_sorour_cell)
-    return online + offline
+    # Sorour file ships a 3rd table that's a Ballroom-A-specific detail
+    # schedule (the one karlla1220 uses for Ballroom A) — header layout is
+    # Mon=1col, Tue=2cols, Wed=1col, Thu=1col, Fri=1col. Every cell belongs
+    # to Ballroom A for its day.
+    a_only_extras = []
+    if len(tables) >= 3:
+        a_cols = {'Mon': [1], 'Tue': [2, 3], 'Wed': [4], 'Thu': [5], 'Fri': [6]}
+        a_only_extras = parse_main_table(
+            tables[2], a_cols,
+            lambda d, o: 'Ballroom A (3F)',
+            parse_sorour_cell)
+        for s in a_only_extras:
+            # Mark these as Sorour-hosted so the modal/legend reflects ownership.
+            if not s.get('host'):
+                s['host'] = 'Sorour'
+    return online + offline + a_only_extras
+
+def parse_main_docx_room_for_offline(day, offset):
+    """Mon offline has 3 cols (Dalian / Shanghai / Sorouri-side); other days
+    have 2 (Dalian / Shanghai). On Monday only, the third offset corresponds
+    to Ballroom A (the room Sorouri uses when the online plenary occupies
+    Ballroom A's online slot). Karlla1220 routes Mon offline col-3 there."""
+    offline_rooms = ['Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)']
+    if day == 'Mon' and offset == 2:
+        return 'Ballroom A (3F)'
+    return offline_rooms[min(offset, 1)]
 
 # -------- Hiroki parser (bold=category, italic=sub-session) --------
 
@@ -632,11 +712,14 @@ def parse_hiroki_cell(cell, period_start, period_end):
         d = min(dur, period_end - cursor)
         if d <= 0:
             return
+        # If ai_text is provided (e.g. the italic AI sub-item), keep it as-is
+        # since it's the docx's own listing; otherwise derive from title.
+        ai_value = ai_text if ai_text else extract_ai_label(title)
         sessions.append({
             'start': to_hhmm(cursor),
             'end':   to_hhmm(cursor + d),
             'title': title,
-            'ai':    ai_text if ai_text else ('AI ' + (title.split()[0] if title else '')),
+            'ai':    ai_value,
             'category': fuzzy_category(cat_hint or title),
             'host':  'Hiroki',
         })
