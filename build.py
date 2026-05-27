@@ -678,24 +678,45 @@ def parse_hiroki_table(tbl, offline):
         this_period = period_idx
         period_idx += 1
         day_cells_seen = 0
+        col = 0
         for ci, cell in enumerate(cells):
+            span = cell_span(cell)
+            start_col = col
+            col += span
             if ci == 0:
                 continue
-            if day_cells_seen >= len(DAYS):
-                break
-            day = DAYS[day_cells_seen]
-            day_cells_seen += 1
             if offline:
+                # Offline table: 1 time col + 5 days × 2 rooms = 11 grid columns.
+                # Map grid column → (day, room) instead of trusting cell index,
+                # because cells can have gridSpan>1 (e.g. when a day's two rooms
+                # are merged into one empty cell).
+                day_idx = (start_col - 1) // 2
+                if day_idx >= len(DAYS):
+                    break
+                day = DAYS[day_idx]
+                room_offset = (start_col - 1) % 2
+                room = 'Dalian Ballroom 1 (3F)' if room_offset == 0 else 'Shanghai Function room (3F)'
                 day_sessions = parse_hiroki_offline_cell(cell, p_start, p_end)
+                if day == 'Mon' and this_period == 0:
+                    end_align_sessions(day_sessions, p_end)
+                for s in day_sessions:
+                    s['day'] = day
+                    s['room'] = room
+                    if span > 1:
+                        s['span'] = span
+                    sessions.append(s)
             else:
+                if day_cells_seen >= len(DAYS):
+                    break
+                day = DAYS[day_cells_seen]
+                day_cells_seen += 1
                 day_sessions = parse_hiroki_cell(cell, p_start, p_end)
-            if day == 'Mon' and this_period == 0:
-                end_align_sessions(day_sessions, p_end)
-            for s in day_sessions:
-                s['day'] = day
-                if not offline:
+                if day == 'Mon' and this_period == 0:
+                    end_align_sessions(day_sessions, p_end)
+                for s in day_sessions:
+                    s['day'] = day
                     s['room'] = 'Ballroom C (3F)'
-                sessions.append(s)
+                    sessions.append(s)
     return sessions
 
 def parse_hiroki_docx(docx_bytes):
@@ -777,36 +798,68 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
         if s['room'] in ('Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)')
     ])
 
+    OFFLINE_ROOMS = ('Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)')
+
+    # First pass: find which (day, period) slots have a host-match trigger
+    # in main's offline rows. Those slots will be replaced by Hiroki/Sorour
+    # content using their OWN room assignment (Hiroki parser now sets it via
+    # gridSpan/gridBefore-aware col tracking; Sorour parser uses parse_main_table
+    # with offline_day_cols).
+    hiroki_replace = set()
+    sorour_replace = set()
+    for s in out:
+        if s['room'] not in OFFLINE_ROOMS:
+            continue
+        p = find_period(to_min(s['start']))
+        if p is None:
+            continue
+        host = s.get('host')
+        if host == 'Hiroki' and (s['day'], p) in hiroki_off_idx:
+            hiroki_replace.add((s['day'], p))
+        elif host in ('Sorour', 'Sorouri') and (s['day'], p) in sorour_off_idx:
+            sorour_replace.add((s['day'], p))
+
     keep = []
     for s in out:
-        if s['room'] not in ('Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)'):
+        if s['room'] not in OFFLINE_ROOMS:
             keep.append(s)
             continue
-        sm = to_min(s['start'])
-        p = find_period(sm)
+        p = find_period(to_min(s['start']))
         host = s.get('host')
-        replaced = False
-        if p and host == 'Hiroki' and (s['day'], p) in hiroki_off_idx:
-            for sub in hiroki_off_idx[(s['day'], p)]:
-                ns = dict(sub)
-                ns['room'] = s['room']
-                ns['day'] = s['day']
-                keep.append(ns)
-            replaced = True
-        elif p and host in ('Sorour', 'Sorouri') and (s['day'], p) in sorour_off_idx:
-            for sub in sorour_off_idx[(s['day'], p)]:
-                ns = dict(sub)
-                ns['room'] = s['room']
-                ns['day'] = s['day']
-                keep.append(ns)
-            replaced = True
-        if not replaced:
-            keep.append(s)
+        # Drop main's session if it'll be replaced; otherwise keep.
+        if p and host == 'Hiroki' and (s['day'], p) in hiroki_replace:
+            continue
+        if p and host in ('Sorour', 'Sorouri') and (s['day'], p) in sorour_replace:
+            continue
+        keep.append(s)
+
+    # Add Hiroki/Sorour offline sessions exactly ONCE per replaced slot,
+    # using their parser-assigned rooms.
+    for (day, p) in hiroki_replace:
+        for sub in hiroki_off_idx[(day, p)]:
+            ns = dict(sub)
+            ns['day'] = day
+            if not ns.get('room'):
+                ns['room'] = 'Dalian Ballroom 1 (3F)'
+            keep.append(ns)
+    for (day, p) in sorour_replace:
+        for sub in sorour_off_idx[(day, p)]:
+            ns = dict(sub)
+            ns['day'] = day
+            if not ns.get('room'):
+                ns['room'] = 'Dalian Ballroom 1 (3F)'
+            keep.append(ns)
 
     seen = set()
     dedup = []
     for s in keep:
-        key = (s['day'], s['room'], s['start'], s['end'], s['title'])
+        # Dedup on (day, room, start, end) — two sessions can't legitimately
+        # occupy the same time slot in the same room, so different titles
+        # ('6G waveform' vs '10.2.1 Waveform') for the same slot are the
+        # same underlying session as transcribed differently across files.
+        # Keep the first occurrence (which is the one from the higher-priority
+        # source given our insertion order).
+        key = (s['day'], s['room'], s['start'], s['end'])
         if key in seen:
             continue
         seen.add(key)
