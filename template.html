@@ -291,7 +291,10 @@
     :root {
       --row-h: 22px;
       --label-w: 44px;
-      --col-min-w: 80px;
+      /* Each room column sized so EXACTLY 3 fit on a phone screen alongside
+         the time column. On larger phone-landscape / small-tablet widths the
+         min() cap kicks in so columns don't blow up and all 5 can still fit. */
+      --col-min-w: min(calc((100vw - var(--label-w) - 28px) / 3), 120px);
     }
     header { padding: 12px 12px 10px; }
     h1 { font-size: 17px; }
