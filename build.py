@@ -501,6 +501,7 @@ def parse_main_table(tbl, day_to_cols, room_assignment, cell_parser):
             for s in cell_sessions:
                 s['day'] = day
                 s['room'] = room
+                s['span'] = span
                 sessions.append(s)
     return sessions
 
