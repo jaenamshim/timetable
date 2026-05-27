@@ -612,6 +612,7 @@ function render() {
     timeCol.className = "time-col";
     timeCol.style.height = totalH + "px";
     timeCol.style.gridColumn = "1";
+    timeCol.style.gridRow = "2";
     grid.appendChild(timeCol);
 
     for (let m = dayStart; m <= dayEnd; m += 30) {
@@ -628,6 +629,7 @@ function render() {
       c.className = "room-col";
       c.style.height = totalH + "px";
       c.style.gridColumn = (idx + 2).toString();
+      c.style.gridRow = "2";
       grid.appendChild(c);
       for (let m = dayStart; m <= dayEnd; m += 30) {
         const top = (m - dayStart) * PX_PER_MIN;
@@ -660,11 +662,13 @@ function render() {
       (a.host || '') === (b.host || '') && a.category === b.category;
     const N_ROOMS = scheduleData.rooms.length;
     const renderable = daySessions.filter(s => {
-      // Drop if another session at LOWER room index spans to cover this one.
+      // Drop if our immediate left neighbor has the same signature, since
+      // it'll auto-expand to cover us. Online (rooms 0-2) and offline (3+)
+      // are separate groups — rooms 0 and 3 are group-leftmosts and never
+      // dropped against the room on their left.
+      if (s.room === 0 || s.room === 3) return true;
       return !daySessions.some(o =>
-        o !== s && o.room < s.room &&
-        (o.room + Math.max(o.span || 1, 1)) > s.room &&
-        sameSig(o, s));
+        o !== s && o.room === s.room - 1 && sameSig(o, s));
     });
 
     renderable.forEach(s => {
