@@ -324,10 +324,12 @@ def fuzzy_category(label):
 # -------- main parser (existing logic) --------
 
 def parse_main_cell(lines, period_start, period_end):
-    # Pre-scan for two Monday-morning idioms:
+    # Pre-scan for these idioms:
     #   1. "RAN1#NNN commences at HH:MM on Monday" → shift effective_start
     #   2. "Agenda items 1, 2, 3, 4, 5"             → emit as filler later
+    #   3. "expected to close at HH:MM"             → extend effective_end
     effective_start = period_start
+    effective_end = period_end
     agenda_line = None
     filtered = []
     for line in lines:
@@ -341,6 +343,14 @@ def parse_main_cell(lines, period_start, period_end):
             if new_start > effective_start:
                 effective_start = new_start
             continue
+        m_close = re.search(r'close[s]?\s+at\s+(\d{1,2}):(\d{2})', s, re.IGNORECASE)
+        if m_close:
+            h = int(m_close.group(1)); mm = int(m_close.group(2))
+            new_end = h * 60 + mm
+            if new_end > effective_end:
+                effective_end = new_end
+            # Don't `continue` — keep the line so its prose ("RAN1#... expected
+            # to close at 17:00") is still available as title material.
         if re.match(r'^agenda\s+items?\b', s, re.IGNORECASE):
             agenda_line = s
             continue
@@ -352,11 +362,15 @@ def parse_main_cell(lines, period_start, period_end):
     cat = None
     host = None
     pending = [None, 0, False]
+    # Bare labels (no duration, not a category/host/AI number) are accumulated
+    # here and prepended to the next emitted session's title — preserves notes
+    # like "Sweep" that appear between sessions in main's cells.
+    extra_label_parts = []
 
     def flush(c):
         if pending[0] and not pending[2] and pending[1]:
             label, dur, _ = pending
-            end = min(c + dur, period_end)
+            end = min(c + dur, effective_end)
             if end > c:
                 sessions.append({
                     'start': to_hhmm(c), 'end': to_hhmm(end),
@@ -389,8 +403,11 @@ def parse_main_cell(lines, period_start, period_end):
                     pending[0] = label; pending[1] = dur; pending[2] = False
                     continue
                 session_label = label.lstrip('.').strip()
-                if cursor + dur > period_end:
-                    dur = max(0, period_end - cursor)
+                if extra_label_parts:
+                    session_label = ' '.join(extra_label_parts) + ' ' + session_label
+                    extra_label_parts = []
+                if cursor + dur > effective_end:
+                    dur = max(0, effective_end - cursor)
                 if dur <= 0:
                     continue
                 sessions.append({
@@ -409,24 +426,47 @@ def parse_main_cell(lines, period_start, period_end):
                 elif sub in HOSTS:
                     host = sub
                 else:
-                    # Handle bare AI items without a (NN) duration marker —
-                    # e.g. main Friday Ballroom A morning has "R20(60) IoT-NTN(30)
-                    # NR-NTN(30) Sweep 6GR .10.3.1" where ".10.3.1" should claim
-                    # the remaining 60 minutes of the period.
                     sub_stripped = sub.lstrip('.').strip()
                     if re.match(r'^\d+(\.\d+)+', sub_stripped):
+                        # Bare AI item — claim remaining time of the (possibly
+                        # extended) period.
                         cursor = flush(cursor)
-                        remaining = period_end - cursor
+                        remaining = effective_end - cursor
                         if remaining > 0:
+                            title = sub_stripped
+                            if extra_label_parts:
+                                title = ' '.join(extra_label_parts) + ' ' + title
+                                extra_label_parts = []
                             sessions.append({
                                 'start': to_hhmm(cursor),
-                                'end':   to_hhmm(period_end),
-                                'title': sub_stripped,
+                                'end':   to_hhmm(effective_end),
+                                'title': title,
                                 'ai':    'AI ' + (sub_stripped.split()[0] if sub_stripped else sub_stripped),
                                 'category': CAT_MAP.get(cat, 'R20'),
                                 'host':  host,
                             })
-                            cursor = period_end
+                            cursor = effective_end
+                    else:
+                        # Plain prose like "Sweep" or "Any other open issues" —
+                        # buffer for the next session's title or, if no session
+                        # follows, the closing-remarks fallback below.
+                        extra_label_parts.append(sub)
+    cursor = flush(cursor)
+
+    # Closing-remarks fallback: cell has only prose (no duration/AI items),
+    # e.g. Friday "Any other open issues... expected to close at 17:00".
+    # Emit ONE session over the full (effective_start, effective_end) range,
+    # combining the prose into the title.
+    if not sessions and extra_label_parts:
+        title = ' '.join(extra_label_parts).strip()
+        sessions.append({
+            'start': to_hhmm(effective_start),
+            'end':   to_hhmm(effective_end),
+            'title': title,
+            'ai':    'Closing',
+            'category': CAT_MAP.get(cat, 'R20'),
+            'host':  host,
+        })
     cursor = flush(cursor)
 
     # If we detected "Agenda items..." but had no other sessions, emit it as
@@ -857,6 +897,39 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
             ns = dict(sub)
             ns['day'] = day
             keep.append(ns)
+
+    # Drop main's "category-only" sessions ("AI 8", "R20", "6GR", "Coverage",
+    # "Sensing"-style) when more detailed sessions from Hiroki/Sorour cover
+    # the same (day, room) time range. These generic blocks appear when main
+    # had only a category header for the slot but a parser detail-file has
+    # the actual sub-session breakdown — visually they'd just stack on top
+    # of the detail and look like duplicates.
+    def is_generic_title(t):
+        if not t:
+            return True
+        if t in CATEGORIES:
+            return True
+        # Single-word categories or fuzzy markers that don't carry topic info.
+        if t.lower() in ('coverage', 'sensing', 'a-iot phase2', 'a-iot',
+                         'sweep', 'mimo', 'iot-ntn', 'ntn-nr', 'nr-ntn',
+                         'modulation', 'channel coding'):
+            return True
+        return False
+
+    def overlaps(a, b):
+        return not (to_min(a['end']) <= to_min(b['start']) or
+                    to_min(a['start']) >= to_min(b['end']))
+
+    def is_more_detailed(other, s):
+        # `other` covers s's range if its [start,end] overlaps and other has
+        # a non-generic title (a real topic, not just a category header).
+        return (other is not s and other['day'] == s['day'] and
+                other['room'] == s['room'] and overlaps(other, s) and
+                not is_generic_title(other.get('title')))
+
+    keep = [s for s in keep
+            if not (is_generic_title(s.get('title')) and
+                    any(is_more_detailed(o, s) for o in keep))]
 
     seen = set()
     dedup = []
