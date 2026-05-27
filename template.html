@@ -17,12 +17,22 @@
     --line-strong: #cdccc6;
     --now: #c54545;
 
-    /* Color palette — more visible than dusty pastels, less harsh than neon.
-       Each color has ~4.5:1 contrast vs white text for legibility. */
-    --cat-6GR:    #2d7569;  /* forest teal */
-    --cat-AI78:   #a14770;  /* muted burgundy */
-    --cat-MAINT:  #b06525;  /* burnished bronze */
-    --cat-R20:    #3d6299;  /* navy blue */
+    /* Category colors. The strong variant is for chips, NOW accent, and
+       session left-border. The bg/fg variants are used INSIDE session blocks
+       (pastel background + dark text) for much better readability on phone
+       screens and in bright sunlight than white-text-on-color. */
+    --cat-6GR:    #2d7569;
+    --cat-AI78:   #a14770;
+    --cat-MAINT:  #b06525;
+    --cat-R20:    #3d6299;
+    --cat-6GR-bg:   #d8ebe6;
+    --cat-AI78-bg:  #f0dde6;
+    --cat-MAINT-bg: #f0dfc8;
+    --cat-R20-bg:   #d8e1f0;
+    --cat-6GR-fg:   #154037;
+    --cat-AI78-fg:  #5c2440;
+    --cat-MAINT-fg: #5c3210;
+    --cat-R20-fg:   #1d3358;
 
     --row-h: 28px;
     --label-w: 56px;
@@ -40,6 +50,9 @@
     font-size: 13px;
     line-height: 1.35;
     -webkit-font-smoothing: antialiased;
+    /* Stop iOS Safari from rubber-banding the page vertically when the
+       user scrolls horizontally within a table. */
+    overscroll-behavior-y: contain;
   }
 
   header {
@@ -129,7 +142,14 @@
     vertical-align: middle;
   }
 
-  .grid-wrap { overflow-x: auto; }
+  .grid-wrap {
+    overflow-x: auto;
+    /* Smooth momentum scrolling on iOS Safari and contain the rubber-band so
+       the table doesn't pull the whole page sideways. */
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    touch-action: pan-x pan-y;
+  }
   .grid {
     display: grid;
     grid-template-columns: var(--label-w) repeat(var(--n-rooms), minmax(var(--col-min-w), 1fr));
@@ -186,22 +206,21 @@
     left: 2px; right: 2px;
     padding: 4px 6px;
     border-radius: 3px;
-    color: white;
     font-size: 11px;
     overflow: hidden;
     cursor: pointer;
     transition: opacity 0.15s, transform 0.05s;
-    border-left: 3px solid rgba(0,0,0,0.22);
+    border-left: 3px solid;
   }
-  .session:hover { transform: translateX(1px); filter: brightness(1.06); }
-  .session[data-cat="6GR"]   { background: var(--cat-6GR); }
-  .session[data-cat="AI78"]  { background: var(--cat-AI78); }
-  .session[data-cat="MAINT"] { background: var(--cat-MAINT); }
-  .session[data-cat="R20"]   { background: var(--cat-R20); }
+  .session:hover { transform: translateX(1px); filter: brightness(0.97); }
+  .session[data-cat="6GR"]   { background: var(--cat-6GR-bg);   color: var(--cat-6GR-fg);   border-left-color: var(--cat-6GR); }
+  .session[data-cat="AI78"]  { background: var(--cat-AI78-bg);  color: var(--cat-AI78-fg);  border-left-color: var(--cat-AI78); }
+  .session[data-cat="MAINT"] { background: var(--cat-MAINT-bg); color: var(--cat-MAINT-fg); border-left-color: var(--cat-MAINT); }
+  .session[data-cat="R20"]   { background: var(--cat-R20-bg);   color: var(--cat-R20-fg);   border-left-color: var(--cat-R20); }
   .session.dim { opacity: var(--dim-opacity); }
   .session .s-title { font-weight: 600; }
-  .session .s-meta { font-family: 'IBM Plex Mono', monospace; font-size: 10px; opacity: 0.9; }
-  .session .s-ai { margin-top: 2px; font-size: 10px; opacity: 0.95; }
+  .session .s-meta  { font-family: 'IBM Plex Mono', monospace; font-size: 10px; opacity: 0.75; }
+  .session .s-ai    { margin-top: 2px; font-size: 10px; opacity: 0.85; }
 
   .now-line {
     position: absolute;
@@ -424,8 +443,37 @@ const MEETING_DAY = (() => {
   const d = meetingNow().dayName;
   return DAYS.includes(d) ? d : null;
 })();
-// Default selected day: today (if within meeting), otherwise Monday.
-const DEFAULT_DAY = MEETING_DAY || 'Mon';
+
+/* Persist active day + scroll position across page reloads (e.g. the 30-min
+   auto-refresh). sessionStorage scope = this tab only. */
+const VIEW_STATE_KEY = 'ran1_view_state';
+function saveViewState() {
+  const activeDay = DAYS.find(d => state.days[d]) || null;
+  try {
+    sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
+      activeDay,
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+    }));
+  } catch (e) { /* private mode etc. */ }
+}
+function loadViewState() {
+  try {
+    const raw = sessionStorage.getItem(VIEW_STATE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+const savedView = loadViewState();
+// Default selected day: previously viewed day → today (if within meeting) → Monday.
+let DEFAULT_DAY;
+if (savedView && savedView.activeDay && DAYS.includes(savedView.activeDay)) {
+  DEFAULT_DAY = savedView.activeDay;
+} else if (MEETING_DAY) {
+  DEFAULT_DAY = MEETING_DAY;
+} else {
+  DEFAULT_DAY = 'Mon';
+}
 state.days[DEFAULT_DAY] = true;
 
 let lastUserScroll = 0;
@@ -621,6 +669,7 @@ document.getElementById("controls").addEventListener("click", e => {
       btn.dataset.on = (btn.dataset.day === day) ? "true" : "false";
     });
     render();
+    saveViewState();
   } else if (e.target.id === "now-btn") {
     if (e.target.hasAttribute("disabled")) return;
     render();
@@ -696,7 +745,14 @@ if (!WITHIN_MEETING) {
 
 render();
 
-function scrollToNowOrTop() {
+function scrollToInitial() {
+  // 1. If we have a saved scroll position from a previous view (e.g. before
+  //    the 30-min auto-refresh kicked in), restore it.
+  if (savedView && (savedView.scrollX || savedView.scrollY)) {
+    window.scrollTo(savedView.scrollX || 0, savedView.scrollY || 0);
+    return;
+  }
+  // 2. Otherwise, if the meeting is in progress, scroll to the NOW line.
   if (WITHIN_MEETING) {
     const line = document.querySelector(".now-line");
     if (line) {
@@ -704,11 +760,21 @@ function scrollToNowOrTop() {
       return;
     }
   }
+  // 3. Otherwise scroll to the top of the day.
   const first = document.querySelector(".day-section");
   if (first) first.scrollIntoView({ behavior: "smooth", block: "start" });
 }
-setTimeout(scrollToNowOrTop, 100);
+setTimeout(scrollToInitial, 100);
 
+// Save scroll position whenever the user scrolls (debounced).
+let _saveTimer;
+window.addEventListener('scroll', () => {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(saveViewState, 250);
+}, { passive: true });
+
+// Re-render the NOW line every minute while the meeting is happening, and
+// auto-scroll to it only if the user hasn't touched the page recently.
 setInterval(() => {
   render();
   if (WITHIN_MEETING && Date.now() - lastUserScroll > 20000) {
@@ -716,6 +782,14 @@ setInterval(() => {
     if (line) line.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 }, 60000);
+
+// Auto-refresh the page every 30 minutes. This re-fetches the latest
+// index.html (which the GitHub Actions cron rebuilds every 30 min from
+// the FTP). Tab + scroll position survive because we persisted them.
+setInterval(() => {
+  saveViewState();
+  location.reload();
+}, 30 * 60 * 1000);
 
 // Re-render on viewport changes (rotation, mobile/desktop breakpoint crossings)
 // so the layout picks up the new CSS variable values.
