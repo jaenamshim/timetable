@@ -408,6 +408,25 @@ def parse_main_cell(lines, period_start, period_end):
                     cursor = flush(cursor); cat = sub
                 elif sub in HOSTS:
                     host = sub
+                else:
+                    # Handle bare AI items without a (NN) duration marker —
+                    # e.g. main Friday Ballroom A morning has "R20(60) IoT-NTN(30)
+                    # NR-NTN(30) Sweep 6GR .10.3.1" where ".10.3.1" should claim
+                    # the remaining 60 minutes of the period.
+                    sub_stripped = sub.lstrip('.').strip()
+                    if re.match(r'^\d+(\.\d+)+', sub_stripped):
+                        cursor = flush(cursor)
+                        remaining = period_end - cursor
+                        if remaining > 0:
+                            sessions.append({
+                                'start': to_hhmm(cursor),
+                                'end':   to_hhmm(period_end),
+                                'title': sub_stripped,
+                                'ai':    'AI ' + (sub_stripped.split()[0] if sub_stripped else sub_stripped),
+                                'category': CAT_MAP.get(cat, 'R20'),
+                                'host':  host,
+                            })
+                            cursor = period_end
     cursor = flush(cursor)
 
     # If we detected "Agenda items..." but had no other sessions, emit it as
@@ -745,30 +764,14 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
                 return i
         return None
 
-    # For each (day, period), which rooms does Sorour/Hiroki actually override?
-    # Sorour file's Monday morning row often has gridSpan=3 on the first cell —
-    # meaning Sorour has NO Monday-AM data for Ballroom A or C. In those cases
-    # we must keep the main file's content rather than blank the slot.
-    sorour_a_cover = set()  # (day, period_idx)
-    for s in sorour_sessions:
-        if s['room'] != 'Ballroom A (3F)':
-            continue
-        pi = find_period_idx(to_min(s['start']))
-        if pi is not None:
-            sorour_a_cover.add((s['day'], pi))
-    hiroki_c_cover = set()
-    for s in hiroki_data['online']:
-        pi = find_period_idx(to_min(s['start']))
-        if pi is not None:
-            hiroki_c_cover.add((s['day'], pi))
-
+    # Online overrides: previously we DROPPED main's Ballroom A sessions
+    # whenever Sorour had any A content for the same (day, period), and same
+    # for Ballroom C vs Hiroki. That lost info when Sorour/Hiroki's notes
+    # were less detailed than main's (e.g. main Friday Ballroom A has
+    # "...Sweep 6GR .10.3.1" but Sorour omits the .10.3.1). Now we KEEP
+    # main's sessions and rely on (day, room, start, end) dedup at the end
+    # to absorb exact duplicates while preserving the union of info.
     for s in main_sessions:
-        sm = to_min(s['start'])
-        pi = find_period_idx(sm)
-        if s['room'] == 'Ballroom A (3F)' and pi is not None and (s['day'], pi) in sorour_a_cover:
-            continue
-        if s['room'] == 'Ballroom C (3F)' and pi is not None and (s['day'], pi) in hiroki_c_cover:
-            continue
         out.append(s)
     for s in sorour_sessions:
         if s['room'] == 'Ballroom A (3F)':
@@ -800,24 +803,20 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
 
     OFFLINE_ROOMS = ('Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)')
 
-    # First pass: find which (day, period) slots have a host-match trigger
-    # in main's offline rows. Those slots will be replaced by Hiroki/Sorour
-    # content using their OWN room assignment (Hiroki parser now sets it via
-    # gridSpan/gridBefore-aware col tracking; Sorour parser uses parse_main_table
-    # with offline_day_cols).
-    hiroki_replace = set()
-    sorour_replace = set()
-    for s in out:
-        if s['room'] not in OFFLINE_ROOMS:
-            continue
-        p = find_period(to_min(s['start']))
-        if p is None:
-            continue
-        host = s.get('host')
-        if host == 'Hiroki' and (s['day'], p) in hiroki_off_idx:
-            hiroki_replace.add((s['day'], p))
-        elif host in ('Sorour', 'Sorouri') and (s['day'], p) in sorour_off_idx:
-            sorour_replace.add((s['day'], p))
+    # Per (day, period, room), only replace when the corresponding parser
+    # actually has content for THAT specific room. Otherwise main Shanghai's
+    # "host=Sorour" sessions get wiped because Sorour's file has only Dalian
+    # content (or none at all) for the same slot.
+    hiroki_replace_rooms = {}  # (day, p) -> set of rooms with Hiroki content
+    sorour_replace_rooms = {}
+    for (day, p), subs in hiroki_off_idx.items():
+        rooms = {sub.get('room') for sub in subs if sub.get('room')}
+        if rooms:
+            hiroki_replace_rooms[(day, p)] = rooms
+    for (day, p), subs in sorour_off_idx.items():
+        rooms = {sub.get('room') for sub in subs if sub.get('room')}
+        if rooms:
+            sorour_replace_rooms[(day, p)] = rooms
 
     keep = []
     for s in out:
@@ -826,28 +825,37 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
             continue
         p = find_period(to_min(s['start']))
         host = s.get('host')
-        # Drop main's session if it'll be replaced; otherwise keep.
-        if p and host == 'Hiroki' and (s['day'], p) in hiroki_replace:
+        # Drop main's offline session only if its replacement parser actually
+        # has content for THIS room (not just for the same (day, period)).
+        if p and host == 'Hiroki' and s['room'] in hiroki_replace_rooms.get((s['day'], p), set()):
             continue
-        if p and host in ('Sorour', 'Sorouri') and (s['day'], p) in sorour_replace:
+        if p and host in ('Sorour', 'Sorouri') and s['room'] in sorour_replace_rooms.get((s['day'], p), set()):
             continue
         keep.append(s)
 
-    # Add Hiroki/Sorour offline sessions exactly ONCE per replaced slot,
-    # using their parser-assigned rooms.
-    for (day, p) in hiroki_replace:
+    # Add Hiroki/Sorour offline sessions exactly once per (day, period, room)
+    # they cover, using parser-assigned rooms.
+    added_h = set()
+    added_s = set()
+    for (day, p), rooms in hiroki_replace_rooms.items():
         for sub in hiroki_off_idx[(day, p)]:
+            r = sub.get('room')
+            if r not in rooms: continue
+            key = (day, p, r, sub.get('start'), sub.get('end'), sub.get('title'))
+            if key in added_h: continue
+            added_h.add(key)
             ns = dict(sub)
             ns['day'] = day
-            if not ns.get('room'):
-                ns['room'] = 'Dalian Ballroom 1 (3F)'
             keep.append(ns)
-    for (day, p) in sorour_replace:
+    for (day, p), rooms in sorour_replace_rooms.items():
         for sub in sorour_off_idx[(day, p)]:
+            r = sub.get('room')
+            if r not in rooms: continue
+            key = (day, p, r, sub.get('start'), sub.get('end'), sub.get('title'))
+            if key in added_s: continue
+            added_s.add(key)
             ns = dict(sub)
             ns['day'] = day
-            if not ns.get('room'):
-                ns['room'] = 'Dalian Ballroom 1 (3F)'
             keep.append(ns)
 
     seen = set()
