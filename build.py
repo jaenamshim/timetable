@@ -260,6 +260,53 @@ def end_align_sessions(sessions, period_end):
             s['end']   = to_hhmm(to_min(s['end']) + shift)
     return sessions
 
+def extract_room_names(docx_bytes):
+    """Pull the set of room names mentioned in the main docx file.
+
+    The schedule docx has two header paragraphs that look like:
+      "<room1>(3F)<room1>(3F)<room2>(3F)<room2>(3F)...  RAN1#NNN Online Session Schedule"
+      "<roomA>(3F)<roomA>(3F)<roomB>(3F)<roomB>(3F)...  RAN1#NNN Offline Session Schedule"
+    (Each name is duplicated for layout reasons.)
+
+    Returns (online_rooms, offline_rooms) as ordered lists with duplicates
+    removed, or ([], []) if not found. The ORDER reflects the docx text — it
+    may or may not match the actual table column order, which is why
+    `merge_three` / `main` only uses this for verification + a warning, not as
+    the source of truth for the column-to-room mapping.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
+            xml = z.read('word/document.xml')
+    except Exception:
+        return [], []
+    root = ET.fromstring(xml)
+    body = root.find('.//w:body', NS)
+    if body is None:
+        return [], []
+    online_text = None
+    offline_text = None
+    for child in body:
+        if child.tag.split('}')[-1] != 'p':
+            continue
+        text = ''.join(t.text for t in child.findall('.//w:t', NS) if t.text)
+        if 'Online' in text and 'Schedule' in text and '(3F)' in text:
+            online_text = text
+        elif 'Offline' in text and 'Schedule' in text and '(3F)' in text:
+            offline_text = text
+    def parse(text):
+        if not text:
+            return []
+        # Match anything ending in "(<digit>F)" — captures the leading name.
+        names = re.findall(r'([A-Z][A-Za-z0-9 ]*?)\s*\(\dF\)', text)
+        out = []
+        for n in names:
+            n = re.sub(r'\s+', ' ', n).strip()
+            full = n + ' (3F)'  # normalize spacing
+            if full not in out and 'Schedule' not in n and 'RAN' not in n:
+                out.append(full)
+        return out
+    return parse(online_text), parse(offline_text)
+
 def fuzzy_category(label):
     if not label:
         return 'R20'
@@ -798,7 +845,8 @@ def main():
     meeting_label_match = re.match(r'^([A-Z0-9#]+)', main_fn)
     meeting_label = meeting_label_match.group(1) if meeting_label_match else 'RAN1#' + meeting_num
 
-    main_sessions = parse_main_docx(fetch(main_url))
+    main_docx_bytes = fetch(main_url)
+    main_sessions = parse_main_docx(main_docx_bytes)
     print("  main:   %d sessions" % len(main_sessions), file=sys.stderr)
 
     hiroki_data = {'online': [], 'offline': []}
@@ -821,6 +869,29 @@ def main():
         'Ballroom B (3F)', 'Ballroom A (3F)', 'Ballroom C (3F)',
         'Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)',
     ]
+
+    # Verify the hardcoded room names still match what's in the docx.
+    # If they don't (e.g. the next meeting in Maastricht has different rooms),
+    # print a prominent warning so the user knows to update `all_rooms` above.
+    extracted_online, extracted_offline = extract_room_names(main_docx_bytes)
+    hardcoded_online = set(all_rooms[:3])
+    hardcoded_offline = set(all_rooms[3:])
+    extracted_online_set = set(extracted_online)
+    extracted_offline_set = set(extracted_offline)
+    if extracted_online and extracted_online_set != hardcoded_online:
+        print("", file=sys.stderr)
+        print("⚠️  WARNING: docx ONLINE room names changed — please update build.py!", file=sys.stderr)
+        print("   docx says:  %s" % extracted_online, file=sys.stderr)
+        print("   build.py:   %s" % all_rooms[:3], file=sys.stderr)
+        print("", file=sys.stderr)
+    if extracted_offline and extracted_offline_set != hardcoded_offline:
+        print("", file=sys.stderr)
+        print("⚠️  WARNING: docx OFFLINE room names changed — please update build.py!", file=sys.stderr)
+        print("   docx says:  %s" % extracted_offline, file=sys.stderr)
+        print("   build.py:   %s" % all_rooms[3:], file=sys.stderr)
+        print("", file=sys.stderr)
+    if extracted_online_set == hardcoded_online and extracted_offline_set == hardcoded_offline:
+        print("  room names OK (match docx)", file=sys.stderr)
     merged = merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms)
     print("  merged: %d sessions" % len(merged), file=sys.stderr)
 
