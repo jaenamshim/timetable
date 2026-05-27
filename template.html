@@ -73,7 +73,88 @@
     color: var(--ink);
   }
 
-  .controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .controls { display: flex; flex-direction: column; gap: 8px; }
+  .controls-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .day-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+
+  .chip.day {
+    padding: 7px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    background: var(--bg);
+  }
+  .chip.day[data-on="true"] {
+    background: var(--ink);
+    color: var(--surface);
+    border-color: var(--ink);
+  }
+
+  /* Spanning sessions sit in their own grid cell that overlaps multiple
+     room-cols. Pointer-events:none lets clicks on EMPTY parts pass through
+     to the room-col underneath (e.g. hour-lines); the .session itself
+     re-enables pointer-events so it remains clickable. */
+  .span-cell {
+    position: relative;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .span-cell .session {
+    pointer-events: auto;
+  }
+
+  /* Session-detail modal: opens on cell click. */
+  .modal-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 200;
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .modal-backdrop.shown { opacity: 1; }
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.22);
+    padding: 18px 20px 20px;
+    max-width: 460px;
+    width: 100%;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin-bottom: 10px;
+  }
+  .modal-cat {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    border-left: 3px solid;
+  }
+  .modal-cat[data-cat="6GR"]   { background: var(--cat-6GR-bg);   color: var(--cat-6GR-fg);   border-left-color: var(--cat-6GR); }
+  .modal-cat[data-cat="AI78"]  { background: var(--cat-AI78-bg);  color: var(--cat-AI78-fg);  border-left-color: var(--cat-AI78); }
+  .modal-cat[data-cat="MAINT"] { background: var(--cat-MAINT-bg); color: var(--cat-MAINT-fg); border-left-color: var(--cat-MAINT); }
+  .modal-cat[data-cat="R20"]   { background: var(--cat-R20-bg);   color: var(--cat-R20-fg);   border-left-color: var(--cat-R20); }
+  .modal-close {
+    background: transparent; border: none;
+    font-size: 24px; line-height: 1;
+    cursor: pointer; padding: 2px 6px;
+    color: var(--muted);
+  }
+  .modal-close:hover { color: var(--ink); }
+  .modal-title {
+    font-size: 16px; font-weight: 600;
+    margin: 4px 0 14px; word-break: break-word;
+  }
+  .modal-rows { display: grid; grid-template-columns: 80px 1fr; gap: 6px 14px; font-size: 13px; margin: 0; }
+  .modal-rows dt { color: var(--muted); font-weight: 500; }
+  .modal-rows dd { margin: 0; word-break: break-word; }
   .chip {
     border: 1px solid var(--line-strong);
     background: var(--surface);
@@ -316,18 +397,21 @@
   <h1 id="title">Loading...</h1>
   <div class="meta" id="meta">Loading...</div>
   <div class="controls" id="controls">
-    <button class="chip cat" data-cat="6GR"   data-on="true">6GR</button>
-    <button class="chip cat" data-cat="AI78"  data-on="true">AI 7/8</button>
-    <button class="chip cat" data-cat="MAINT" data-on="true">Maintenance</button>
-    <button class="chip cat" data-cat="R20"   data-on="true">R20</button>
-    <span class="divider"></span>
-    <button class="chip day" data-day="Mon" data-on="true">Mon</button>
-    <button class="chip day" data-day="Tue" data-on="true">Tue</button>
-    <button class="chip day" data-day="Wed" data-on="true">Wed</button>
-    <button class="chip day" data-day="Thu" data-on="true">Thu</button>
-    <button class="chip day" data-day="Fri" data-on="true">Fri</button>
-    <span class="divider"></span>
-    <button class="chip now" id="now-btn">NOW</button>
+    <div class="controls-row">
+      <button class="chip cat" data-cat="6GR"   data-on="true">6GR</button>
+      <button class="chip cat" data-cat="AI78"  data-on="true">AI 7/8</button>
+      <button class="chip cat" data-cat="MAINT" data-on="true">Maintenance</button>
+      <button class="chip cat" data-cat="R20"   data-on="true">R20</button>
+      <span class="divider"></span>
+      <button class="chip now" id="now-btn">NOW</button>
+    </div>
+    <div class="day-tabs">
+      <button class="chip day" data-day="Mon" data-on="true">Mon</button>
+      <button class="chip day" data-day="Tue" data-on="true">Tue</button>
+      <button class="chip day" data-day="Wed" data-on="true">Wed</button>
+      <button class="chip day" data-day="Thu" data-on="true">Thu</button>
+      <button class="chip day" data-day="Fri" data-on="true">Fri</button>
+    </div>
   </div>
 </header>
 
@@ -565,9 +649,51 @@ function render() {
       return c;
     });
 
-    daySessions.forEach(s => {
+    // --- Determine which session block goes where (regular cell vs span) ---
+    // A session can have span > 1 from the docx (gridSpan). When spanning,
+    // we render it as a single grid cell that visually covers multiple
+    // room columns. If duplicates exist in adjacent rooms (e.g. the offline
+    // Mon-AM plenary that lists itself in BOTH Dalian and Shanghai cells),
+    // suppress the redundant ones.
+    const sameSig = (a, b) =>
+      a.start === b.start && a.end === b.end && a.title === b.title &&
+      (a.host || '') === (b.host || '') && a.category === b.category;
+    const N_ROOMS = scheduleData.rooms.length;
+    const renderable = daySessions.filter(s => {
+      // Drop if another session at LOWER room index spans to cover this one.
+      return !daySessions.some(o =>
+        o !== s && o.room < s.room &&
+        (o.room + Math.max(o.span || 1, 1)) > s.room &&
+        sameSig(o, s));
+    });
+
+    renderable.forEach(s => {
       const top = (toMin(s.start) - dayStart) * PX_PER_MIN;
       const h   = (toMin(s.end) - toMin(s.start)) * PX_PER_MIN;
+      // Effective span = declared span, clamped to online/offline boundary
+      // (online rooms = indices 0..2, offline = 3..N) and broken if any
+      // session at a covered higher-index room overlaps in time.
+      const declared = s.span || 1;
+      const isOnline = s.room < 3;
+      const boundary = isOnline ? 3 : N_ROOMS;
+      let effSpan = Math.min(declared, boundary - s.room);
+      // Also expand effSpan to cover identical sessions at adjacent rooms
+      // (handles the "same plenary listed in Dalian AND Shanghai" case).
+      for (let r = s.room + 1; r < boundary; r++) {
+        const has = daySessions.some(o => o.room === r && sameSig(o, s));
+        if (has) effSpan = Math.max(effSpan, r - s.room + 1);
+        else break;
+      }
+      // Break the span if any DIFFERENT session in a covered higher-room
+      // overlaps this time window — that room "wins" its own column.
+      for (let off = 1; off < effSpan; off++) {
+        const r = s.room + off;
+        const conflict = daySessions.some(o =>
+          o.room === r && !sameSig(o, s) &&
+          !(toMin(o.end) <= toMin(s.start) || toMin(o.start) >= toMin(s.end)));
+        if (conflict) { effSpan = off; break; }
+      }
+
       const div = document.createElement("div");
       div.className = "session";
       div.dataset.cat = s.category;
@@ -581,11 +707,26 @@ function render() {
         '</div>' +
         '<div class="s-meta">' + s.start + '\u2013' + s.end + ' (' + dur + 'm)</div>' +
         '<div class="s-ai">' + s.ai + '</div>';
-      div.title = s.title + '\n' + s.ai + '\n' + s.start + '\u2013' + s.end + (s.host ? '\n' + s.host : '');
       const catOn = state.cats[s.category];
       const aiOn = state.aiFilter[s.ai] !== false;
       if (!catOn || !aiOn) div.classList.add("dim");
-      roomCols[s.room].appendChild(div);
+
+      const coveredRooms = [];
+      for (let i = 0; i < effSpan; i++) coveredRooms.push(scheduleData.rooms[s.room + i]);
+      div.addEventListener('click', () => openSessionModal(s, coveredRooms));
+
+      if (effSpan > 1) {
+        // Render in a span-cell that visually covers `effSpan` columns.
+        const cell = document.createElement("div");
+        cell.className = "span-cell";
+        cell.style.gridColumn = (s.room + 2) + ' / span ' + effSpan;
+        cell.style.gridRow = '2';
+        cell.style.height = totalH + 'px';
+        cell.appendChild(div);
+        grid.appendChild(cell);
+      } else {
+        roomCols[s.room].appendChild(div);
+      }
     });
 
     if (WITHIN_MEETING) drawNowLine(roomCols, day, PX_PER_MIN);
@@ -622,6 +763,59 @@ function updateHeaderClock() {
   const mn = meetingNow();
   const tzLabel = MEETING_TZ.replace(/^.*\//, '').replace(/_/g, ' ');
   el.textContent = pad2(mn.hour) + ":" + pad2(mn.minute) + " " + tzLabel;
+}
+
+const CAT_DISPLAY = {
+  '6GR':   '6G Research',
+  'AI78':  'AI 7/8',
+  'MAINT': 'Maintenance',
+  'R20':   'R20',
+};
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function openSessionModal(s, coveredRooms) {
+  // Remove any existing modal first.
+  document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+
+  const dur = toMin(s.end) - toMin(s.start);
+  const roomList = (coveredRooms && coveredRooms.length ? coveredRooms : [scheduleData.rooms[s.room]])
+    .map(escapeHtml).join('<br>');
+  const catLabel = escapeHtml(CAT_DISPLAY[s.category] || s.category);
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true">' +
+      '<div class="modal-header">' +
+        '<span class="modal-cat" data-cat="' + escapeHtml(s.category) + '">' + catLabel + '</span>' +
+        '<button class="modal-close" aria-label="Close">\u00d7</button>' +
+      '</div>' +
+      '<div class="modal-title">' + escapeHtml(s.title) + '</div>' +
+      '<dl class="modal-rows">' +
+        '<dt>Day</dt><dd>' + escapeHtml(s.day) + '</dd>' +
+        '<dt>Time</dt><dd>' + escapeHtml(s.start) + '\u2013' + escapeHtml(s.end) + ' (' + dur + ' min)</dd>' +
+        '<dt>Room</dt><dd>' + roomList + '</dd>' +
+        (s.host ? ('<dt>Host</dt><dd>' + escapeHtml(s.host) + '</dd>') : '') +
+        (s.ai   ? ('<dt>AI Item</dt><dd>' + escapeHtml(s.ai) + '</dd>') : '') +
+      '</dl>' +
+    '</div>';
+  document.body.appendChild(backdrop);
+  requestAnimationFrame(() => backdrop.classList.add('shown'));
+
+  const close = () => {
+    backdrop.classList.remove('shown');
+    setTimeout(() => backdrop.remove(), 150);
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop || e.target.closest('.modal-close')) close();
+  });
+  document.addEventListener('keydown', onKey);
 }
 
 function buildAIFilter() {
