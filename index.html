@@ -291,7 +291,10 @@
     :root {
       --row-h: 22px;
       --label-w: 44px;
-      --col-min-w: 80px;
+      /* Each room column sized so EXACTLY 3 fit on a phone screen alongside
+         the time column. On larger phone-landscape / small-tablet widths the
+         min() cap kicks in so columns don't blow up and all 5 can still fit. */
+      --col-min-w: min(calc((100vw - var(--label-w) - 28px) / 3), 120px);
     }
     header { padding: 12px 12px 10px; }
     h1 { font-size: 17px; }
@@ -376,7 +379,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
     "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Hiroki_notes/RAN1%23125%20schedule%20for%20Hiroki%20Adhoc2%20sessions_v04_9.docx",
     "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Sorour_notes/RAN1%23125%20Sorour%20online%20and%20offline%20schedules%20-%20v00.docx"
   ],
-  "generated": "2026-05-27 14:40 UTC",
+  "generated": "2026-05-27 15:16 UTC",
   "rooms": [
     "Ballroom B (3F)",
     "Ballroom A (3F)",
