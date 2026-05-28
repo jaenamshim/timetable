@@ -221,6 +221,15 @@
 
   .grid-wrap {
     overflow-x: auto;
+    /* Tell mobile browsers: only HORIZONTAL pan is captured by this
+       container — vertical pan falls through to the page. Without this,
+       iOS Safari sometimes intercepts a vertical drag as a "maybe-horizontal
+       gesture", then snaps the view back when it realizes there's no
+       vertical scroll inside. Karlla's table doesn't horizontally scroll,
+       which is why it doesn't hit this bug. */
+    touch-action: pan-x;
+    /* iOS momentum scroll for the horizontal pan. */
+    -webkit-overflow-scrolling: touch;
   }
   .grid {
     display: grid;
