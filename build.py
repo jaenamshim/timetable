@@ -437,9 +437,6 @@ def parse_main_cell(lines, period_start, period_end):
                     pending[0] = canon_cat; pending[1] = dur; pending[2] = False
                     continue
                 session_label = label.lstrip('.').strip()
-                if extra_label_parts:
-                    session_label = ' '.join(extra_label_parts) + ' ' + session_label
-                    extra_label_parts = []
                 if cursor + dur > effective_end:
                     dur = max(0, effective_end - cursor)
                 if dur <= 0:
@@ -470,10 +467,13 @@ def parse_main_cell(lines, period_start, period_end):
                         remaining = effective_end - cursor
                         if remaining > 0:
                             dur = min(60, remaining)
-                            title = sub_stripped
-                            if extra_label_parts:
-                                title = ' '.join(extra_label_parts) + ' ' + title
-                                extra_label_parts = []
+                            # Drop any malformed parenthetical and trailing
+                            # garbage from the title — e.g. ".10.5.4.x (80)0)"
+                            # → "10.5.4.x". The duration we use is the default,
+                            # not whatever junk the docx happened to contain.
+                            title = re.sub(r'\s*\(.*$', '', sub_stripped).strip()
+                            if not title:
+                                title = sub_stripped
                             sessions.append({
                                 'start': to_hhmm(cursor),
                                 'end':   to_hhmm(cursor + dur),
@@ -494,7 +494,12 @@ def parse_main_cell(lines, period_start, period_end):
     # session AND there's leftover time in the period — emit one final
     # session with the prose as title (e.g. "6GR check points" 12:00-13:00).
     if extra_label_parts and cursor < effective_end:
-        title = ' '.join(extra_label_parts).strip()
+        title_parts = list(extra_label_parts)
+        # If the current category isn't already in the prose, include it so
+        # cells like "Sweep / 6GR" render as title='Sweep 6GR'.
+        if cat and not any(cat.lower() in p.lower() for p in extra_label_parts):
+            title_parts.append(cat)
+        title = ' '.join(title_parts).strip()
         if title.lower() != 'tbd':
             sessions.append({
                 'start': to_hhmm(cursor),
@@ -512,7 +517,13 @@ def parse_main_cell(lines, period_start, period_end):
     # Skip empty-placeholder text ("TBD", "To be assigned by ...") since
     # those don't represent real scheduled sessions.
     if not sessions and extra_label_parts:
-        title = ' '.join(extra_label_parts).strip()
+        title_parts = list(extra_label_parts)
+        # If the current category isn't already in the prose, append it —
+        # cells like "Sweep / 6GR" should render title='Sweep 6GR' not just
+        # 'Sweep' (matches karlla's behavior on Fri Ballroom B 11:00-13:00).
+        if cat and not any(cat.lower() in p.lower() for p in extra_label_parts):
+            title_parts.append(cat)
+        title = ' '.join(title_parts).strip()
         if title.lower().strip() != 'tbd':
             sessions.append({
                 'start': to_hhmm(effective_start),
@@ -676,10 +687,13 @@ def parse_sorour_docx(docx_bytes):
             tables[2], a_cols,
             lambda d, o: 'Ballroom A (3F)',
             parse_sorour_cell)
-        for s in a_only_extras:
-            # Mark these as Sorour-hosted so the modal/legend reflects ownership.
-            if not s.get('host'):
-                s['host'] = 'Sorour'
+    # Whole Sorour file describes the room Sorour manages (Ballroom A) —
+    # default host='Sorour' for any A-room session without an explicit host
+    # token in the cell. Sessions where the cell text gave a host (Sorouri,
+    # Hiroki, Xiaodong) keep theirs.
+    for s in online + offline + a_only_extras:
+        if s.get('room') == 'Ballroom A (3F)' and not s.get('host'):
+            s['host'] = 'Sorour'
     return online + offline + a_only_extras
 
 def parse_main_docx_room_for_offline(day, offset):
@@ -696,6 +710,13 @@ def parse_main_docx_room_for_offline(day, offset):
 
 def parse_hiroki_cell(cell, period_start, period_end):
     paras = cell_paragraphs(cell)
+    # If a cell has no duration markers at all, treat it as informational
+    # (notes/labels) rather than schedulable content. Karlla also skips such
+    # cells — e.g. Hiroki Fri Ballroom C 11:00-13:00 lists "6GR check points
+    # / 6G waveform / 10.2.1 / 6G ISAC / 10.8.1, 10.8.2" with no (NN)
+    # anywhere, and karlla emits nothing for that slot.
+    if not any(re.search(r'\(\s*\d+\s*\)', t) for t, _, _ in paras):
+        return []
     sessions = []
     cursor = period_start
     cat_label = None
@@ -770,15 +791,56 @@ def parse_hiroki_cell(cell, period_start, period_end):
             if pending_label is not None:
                 pending_remaining = max(0, pending_remaining - dur)
         else:
-            # Multi-item or no-duration italic. Use pending bold's full
-            # remaining budget if any; otherwise consume rest of period.
+            # Multi-item or no-duration italic following a bold-with-dur.
             if pending_label is not None and pending_remaining > 0:
-                emit(pending_label, text, pending_remaining, pending_label)
+                if ',' in text:
+                    # Comma-list italic following a bold-with-dur. Karlla1220
+                    # always splits when each item has its own (N), using
+                    # those literal durations when they fit in the bold's
+                    # pending budget. Only equal-splits when the sum of
+                    # individuals would overflow (rare; mostly a transcription
+                    # artifact where the bold's stated dur is less than the
+                    # sum of its sub-items).
+                    items_raw = [p.strip() for p in text.split(',') if p.strip()]
+                    item_durs = [re.search(r'\(\s*(\d+)\s*\)', it)
+                                 for it in items_raw]
+                    each_has_dur = (len(items_raw) >= 2 and
+                                    all(m is not None for m in item_durs))
+                    if each_has_dur:
+                        durs = [int(m.group(1)) for m in item_durs]
+                        sum_durs = sum(durs)
+                        clean_items = [re.sub(r'\s*\(.*?\)\s*', '', it).strip()
+                                       for it in items_raw]
+                        clean_items = [c for c in clean_items if c]
+                        if clean_items and sum_durs <= pending_remaining:
+                            # Use the docx's own per-item durations.
+                            for it, d in zip(clean_items, durs):
+                                emit(it, None, d, pending_label)
+                        elif clean_items:
+                            # Overflow — equal-split based on available time.
+                            per = pending_remaining // len(clean_items)
+                            for it in clean_items:
+                                emit(it, None, per, pending_label)
+                        else:
+                            emit(pending_label, text, pending_remaining,
+                                 pending_label)
+                    else:
+                        # No individual durations (e.g. "Draft LS, 9.3.2,
+                        # 9.3.3, 9.3.1") — keep as a single session with the
+                        # bold label as title and the comma-list as AI items.
+                        emit(pending_label, text, pending_remaining,
+                             pending_label)
+                else:
+                    # Single-item italic (e.g. "10.8.1" or "8.2 R19 ISAC CM")
+                    # — italic IS the specific topic, so use it as the title;
+                    # let emit() derive the AI label from it.
+                    emit(text.lstrip('.').strip(), None,
+                         pending_remaining, pending_label)
                 pending_label = None
                 pending_remaining = 0
             else:
                 title = text.lstrip('.').strip()
-                emit(title, title, period_end - cursor, cat_label or title)
+                emit(title, None, period_end - cursor, cat_label or title)
                 break
 
     flush_pending()
@@ -1014,9 +1076,21 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
         if t in CATEGORIES:
             return True
         # Single-word categories or fuzzy markers that don't carry topic info.
-        if t.lower() in ('coverage', 'sensing', 'a-iot phase2', 'a-iot',
-                         'sweep', 'mimo', 'iot-ntn', 'ntn-nr', 'nr-ntn',
-                         'modulation', 'channel coding'):
+        low = t.lower()
+        if low in ('coverage', 'sensing', 'a-iot phase2', 'a-iot',
+                   'sweep', 'mimo', 'iot-ntn', 'ntn-iot', 'ntn-nr', 'nr-ntn',
+                   'ntn', 'modulation', 'channel coding'):
+            return True
+        # "X.Y CategoryWord" — main file's terse summaries like "10.8 Sensing".
+        if re.match(r'^\d+(\.\d+)*\s+(sensing|coverage|sweep|mimo|waveform|'
+                    r'modulation|channel\s+coding|a-iot|iot-ntn|ntn-iot|'
+                    r'ntn-nr|nr-ntn|ntn)$',
+                    low):
+            return True
+        # "Sweep" / "Sweep 6GR" / "Sweep R20" — these are bare-prose artifacts
+        # from Sorour Table 0 trailing-prose fallback; the actual AI item
+        # for that slot lives in another source.
+        if re.match(r'^sweep(\s+\S+)?$', low):
             return True
         return False
 
@@ -1035,6 +1109,24 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
             if not (is_generic_title(s.get('title')) and
                     any(is_more_detailed(o, s) for o in keep))]
 
+    # A second pass: drop no-host sessions that overlap with a hosted session
+    # in the same room (Hiroki/Sorour/Xiaodong). Main file often has terse
+    # summaries ("10.5.4.x" 60m) that overlap with the detail-file's split
+    # versions (e.g. "10.5.4.1" 40m + "10.5.4.3" 40m), and the no-host
+    # summary should give way to the hosted detail.
+    def has_hosted_overlap(s, all_sessions):
+        if s.get('host'):
+            return False
+        for o in all_sessions:
+            if o is s:
+                continue
+            if (o.get('host') and o['day'] == s['day']
+                    and o['room'] == s['room'] and overlaps(o, s)):
+                return True
+        return False
+
+    keep = [s for s in keep if not has_hosted_overlap(s, keep)]
+
     seen = set()
     dedup = []
     for s in keep:
@@ -1049,6 +1141,15 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
             continue
         seen.add(key)
         dedup.append(s)
+
+    # Ballroom A is the room Sorour manages: any session there without an
+    # explicit host (typically because the source was the main docx, which
+    # doesn't carry host info) should default to Sorour to match karlla's
+    # rendering. Sessions with an explicit host (Sorouri Mon AM2, Hiroki, etc.)
+    # keep theirs.
+    for s in dedup:
+        if s['room'] == 'Ballroom A (3F)' and not s.get('host'):
+            s['host'] = 'Sorour'
 
     final = []
     for s in dedup:
