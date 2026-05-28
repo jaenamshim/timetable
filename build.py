@@ -41,10 +41,15 @@ HOST_ALIASES = {
 # both Dalian and Shanghai with multiple host paragraphs (e.g. Fri 14:30
 # cell "To be assigned by Sorour / To be assigned by Hiroki"), each host's
 # sessions are routed to the room below — matching karlla's behavior.
-HOST_TYPICAL_OFFLINE_ROOM = {
-    'Hiroki':   'Dalian Ballroom 1 (3F)',
-    'Sorour':   'Shanghai Function room (3F)',
-    'Xiaodong': 'Dalian Ballroom 1 (3F)',
+# Each host's typical offline column INDEX (0 = first/left offline room,
+# 1 = second/right). The actual room NAME is read from the docx at parse
+# time, so this mapping survives any room renaming. karlla's observed
+# pattern: Hiroki and Xiaodong on the left offline column (typically
+# Dalian), Sorour on the right (typically Shanghai).
+HOST_TYPICAL_OFFLINE_OFFSET = {
+    'Hiroki':   0,
+    'Sorour':   1,
+    'Xiaodong': 0,
 }
 
 def normalize_host(s):
@@ -318,18 +323,17 @@ def end_align_sessions(sessions, period_end):
     return sessions
 
 def extract_room_names(docx_bytes):
-    """Pull the set of room names mentioned in the main docx file.
+    """Pull online and offline room names from the docx, in actual visual
+    left-to-right column order.
 
-    The schedule docx has two header paragraphs that look like:
-      "<room1>(3F)<room1>(3F)<room2>(3F)<room2>(3F)...  RAN1#NNN Online Session Schedule"
-      "<roomA>(3F)<roomA>(3F)<roomB>(3F)<roomB>(3F)...  RAN1#NNN Offline Session Schedule"
-    (Each name is duplicated for layout reasons.)
+    The schedule docx places room labels in positioned textbox anchors
+    (<wp:anchor> with <wp:posOffset>). Each label gets an x-coordinate, so
+    sorting by x recovers the actual visual order — which matches the
+    table's column-to-room layout. Plain text order does NOT, because the
+    anchors are stored in arbitrary order by Word.
 
-    Returns (online_rooms, offline_rooms) as ordered lists with duplicates
-    removed, or ([], []) if not found. The ORDER reflects the docx text — it
-    may or may not match the actual table column order, which is why
-    `merge_three` / `main` only uses this for verification + a warning, not as
-    the source of truth for the column-to-room mapping.
+    Returns (online_rooms, offline_rooms) as left-to-right lists, or
+    ([], []) if not found.
     """
     try:
         with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
@@ -340,29 +344,59 @@ def extract_room_names(docx_bytes):
     body = root.find('.//w:body', NS)
     if body is None:
         return [], []
-    online_text = None
-    offline_text = None
-    for child in body:
-        if child.tag.split('}')[-1] != 'p':
-            continue
-        text = ''.join(t.text for t in child.findall('.//w:t', NS) if t.text)
-        if 'Online' in text and 'Schedule' in text and '(3F)' in text:
-            online_text = text
-        elif 'Offline' in text and 'Schedule' in text and '(3F)' in text:
-            offline_text = text
-    def parse(text):
-        if not text:
+    WP = '{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}'
+    WW = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+
+    def rooms_in_paragraph(p):
+        """Return list of (x_offset, room_name) for every textbox anchor in p
+        that contains a room name. Same room name de-dup'd by keeping the
+        leftmost x."""
+        candidates = []
+        for anc in p.iter(WP + 'anchor'):
+            x = None
+            for posH in anc.iter(WP + 'positionH'):
+                off = posH.find(WP + 'posOffset')
+                if off is not None and off.text:
+                    try:
+                        x = int(off.text)
+                    except ValueError:
+                        pass
+            txt = ''.join(t.text or '' for t in anc.iter(WW + 't')).strip()
+            if not txt:
+                continue
+            if not re.search(r'\(\s*\dF\s*\)|Function\s+room', txt, re.I):
+                continue
+            txt = re.sub(r'\s+', ' ', txt)
+            candidates.append((x, txt))
+        if not candidates:
             return []
-        # Match anything ending in "(<digit>F)" — captures the leading name.
-        names = re.findall(r'([A-Z][A-Za-z0-9 ]*?)\s*\(\dF\)', text)
-        out = []
-        for n in names:
-            n = re.sub(r'\s+', ' ', n).strip()
-            full = n + ' (3F)'  # normalize spacing
-            if full not in out and 'Schedule' not in n and 'RAN' not in n:
-                out.append(full)
-        return out
-    return parse(online_text), parse(offline_text)
+        leftmost = {}
+        for x, r in candidates:
+            if r not in leftmost or (x is not None and
+                                     (leftmost[r] is None or x < leftmost[r])):
+                leftmost[r] = x
+        return sorted(leftmost.items(), key=lambda kv: kv[1] if kv[1] is not None else 0)
+
+    online_rooms = []
+    offline_rooms = []
+    for child in body:
+        if not child.tag.endswith('}p'):
+            continue
+        pairs = rooms_in_paragraph(child)
+        if not pairs:
+            continue
+        names = [r for r, _ in pairs]
+        # Classify online vs offline from surrounding text in the paragraph.
+        text = ''.join(t.text or '' for t in child.findall('.//w:t', NS))
+        if 'Online' in text:
+            online_rooms = names
+        elif 'Offline' in text:
+            offline_rooms = names
+        elif not online_rooms:
+            online_rooms = names
+        else:
+            offline_rooms = names
+    return online_rooms, offline_rooms
 
 def fuzzy_category(label):
     if not label:
@@ -587,7 +621,16 @@ def parse_main_cell(lines, period_start, period_end):
         sessions[0]['_effective_start'] = effective_start
     return sessions
 
-def parse_main_table(tbl, day_to_cols, room_assignment, cell_parser):
+def parse_main_table(tbl, day_to_cols, room_assignment, cell_parser,
+                     offline_rooms_list=None):
+    # Build host → typical offline room name map from the offline rooms
+    # actually present in this docx. If a future RAN1 renames "Dalian
+    # Ballroom 1" to something else, the host mapping flows through.
+    host_typical_room = {}
+    if offline_rooms_list:
+        for host, idx in HOST_TYPICAL_OFFLINE_OFFSET.items():
+            if idx < len(offline_rooms_list):
+                host_typical_room[host] = offline_rooms_list[idx]
     rows = tbl.findall('w:tr', NS)
     sessions = []
     period_idx = 0
@@ -666,11 +709,11 @@ def parse_main_table(tbl, day_to_cols, room_assignment, cell_parser):
                     # Only redistribute when at least one segment has a known
                     # host with a typical room covered by this span.
                     routable = any(
-                        seg_host and HOST_TYPICAL_OFFLINE_ROOM.get(seg_host)
+                        seg_host and host_typical_room.get(seg_host)
                         in unique_rooms for seg_host, _ in segments)
                     if routable:
                         for seg_host, seg_lines in segments:
-                            tgt = HOST_TYPICAL_OFFLINE_ROOM.get(seg_host)
+                            tgt = host_typical_room.get(seg_host)
                             if not (tgt and tgt in unique_rooms):
                                 continue
                             seg_sessions = list(
@@ -741,18 +784,31 @@ def parse_main_docx(docx_bytes):
     tables = root.findall('.//w:tbl', NS)
     if len(tables) < 2:
         raise RuntimeError("Main document doesn't have the expected tables")
-    online_rooms = ['Ballroom B (3F)', 'Ballroom A (3F)', 'Ballroom C (3F)']
-    offline_rooms = ['Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)']
-    online_day_cols  = {'Mon':[1,2,3],'Tue':[4,5,6],'Wed':[7,8,9],'Thu':[10,11,12],'Fri':[13,14,15]}
-    offline_day_cols = {'Mon':[1,2,3],'Tue':[4,5],'Wed':[6,7],'Thu':[8,9],'Fri':[10,11]}
+    # Read room names straight from the docx body (positioned textbox anchors).
+    # If a future RAN1 meeting renames or reorders rooms — just by editing the
+    # docx — the new names flow through automatically with no code change.
+    online_rooms, offline_rooms = extract_room_names(docx_bytes)
+    if not online_rooms:
+        online_rooms = ['Ballroom B (3F)', 'Ballroom A (3F)', 'Ballroom C (3F)']
+    if not offline_rooms:
+        offline_rooms = ['Dalian Ballroom 1 (3F)',
+                         'Shanghai Function room (3F)']
+    online_day_cols  = {'Mon':[1,2,3],'Tue':[4,5,6],'Wed':[7,8,9],
+                        'Thu':[10,11,12],'Fri':[13,14,15]}
+    offline_day_cols = {'Mon':[1,2,3],'Tue':[4,5],'Wed':[6,7],
+                        'Thu':[8,9],'Fri':[10,11]}
+    def offline_room_for(day, offset):
+        # Clamp offsets past the last offline room to the last (handles
+        # Monday's 3 cols where the third clamps onto the right offline room).
+        return offline_rooms[min(offset, len(offline_rooms) - 1)]
     online = parse_main_table(
         tables[0], online_day_cols,
         lambda d, o: online_rooms[o] if o < len(online_rooms) else None,
-        parse_main_cell)
+        parse_main_cell, offline_rooms)
     offline = parse_main_table(
         tables[1], offline_day_cols,
-        parse_main_docx_room_for_offline,
-        parse_main_cell)
+        offline_room_for,
+        parse_main_cell, offline_rooms)
     return online + offline
 
 # -------- Sorour parser (similar to main; ignores "-" prefixed sub-bullets) --------
@@ -768,45 +824,47 @@ def parse_sorour_docx(docx_bytes):
     tables = root.findall('.//w:tbl', NS)
     if len(tables) < 2:
         return []
-    online_rooms = ['Ballroom B (3F)', 'Ballroom A (3F)', 'Ballroom C (3F)']
-    offline_rooms = ['Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)']
-    online_day_cols  = {'Mon':[1,2,3],'Tue':[4,5,6],'Wed':[7,8,9],'Thu':[10,11,12],'Fri':[13,14,15]}
-    offline_day_cols = {'Mon':[1,2,3],'Tue':[4,5],'Wed':[6,7],'Thu':[8,9],'Fri':[10,11]}
+    online_rooms, offline_rooms = extract_room_names(docx_bytes)
+    if not online_rooms:
+        online_rooms = ['Ballroom B (3F)', 'Ballroom A (3F)', 'Ballroom C (3F)']
+    if not offline_rooms:
+        offline_rooms = ['Dalian Ballroom 1 (3F)',
+                         'Shanghai Function room (3F)']
+    online_day_cols  = {'Mon':[1,2,3],'Tue':[4,5,6],'Wed':[7,8,9],
+                        'Thu':[10,11,12],'Fri':[13,14,15]}
+    offline_day_cols = {'Mon':[1,2,3],'Tue':[4,5],'Wed':[6,7],
+                        'Thu':[8,9],'Fri':[10,11]}
+    def offline_room_for(day, offset):
+        return offline_rooms[min(offset, len(offline_rooms) - 1)]
     online = parse_main_table(
         tables[0], online_day_cols,
         lambda d, o: online_rooms[o] if o < len(online_rooms) else None,
-        parse_sorour_cell)
+        parse_sorour_cell, offline_rooms)
     offline = parse_main_table(
         tables[1], offline_day_cols,
-        parse_main_docx_room_for_offline,
-        parse_sorour_cell)
-    # Sorour file ships a 3rd table that's a Ballroom-A-specific detail
-    # schedule (the one karlla1220 uses for Ballroom A) — header layout is
-    # Mon=1col, Tue=2cols, Wed=1col, Thu=1col, Fri=1col. Every cell belongs
-    # to Ballroom A for its day.
+        offline_room_for,
+        parse_sorour_cell, offline_rooms)
+    # Sorour ships a 3rd table that's the detail schedule for the room Sorour
+    # manages — by convention the middle online room (online_rooms[1] in the
+    # extracted left-to-right list, typically "Ballroom A"). Header layout is
+    # Mon=1col, Tue=2cols, Wed=1col, Thu=1col, Fri=1col.
+    sorour_room = (online_rooms[1] if len(online_rooms) >= 2
+                   else 'Ballroom A (3F)')
     a_only_extras = []
     if len(tables) >= 3:
         a_cols = {'Mon': [1], 'Tue': [2, 3], 'Wed': [4], 'Thu': [5], 'Fri': [6]}
         a_only_extras = parse_main_table(
             tables[2], a_cols,
-            lambda d, o: 'Ballroom A (3F)',
-            parse_sorour_cell)
-    # Whole Sorour file describes the room Sorour manages (Ballroom A) —
-    # default host='Sorour' for any A-room session without an explicit host
-    # token in the cell. Sessions where the cell text gave a host (Sorouri,
-    # Hiroki, Xiaodong) keep theirs.
+            lambda d, o: sorour_room,
+            parse_sorour_cell, offline_rooms)
+    # Whole Sorour file describes the room Sorour manages — default
+    # host='Sorour' for any session there without an explicit host token in
+    # the cell. Sessions where the cell text gave a host (Sorouri/Hiroki/
+    # Xiaodong) keep theirs.
     for s in online + offline + a_only_extras:
-        if s.get('room') == 'Ballroom A (3F)' and not s.get('host'):
+        if s.get('room') == sorour_room and not s.get('host'):
             s['host'] = 'Sorour'
     return online + offline + a_only_extras
-
-def parse_main_docx_room_for_offline(day, offset):
-    """Mon offline has 3 cols (Dalian / Shanghai / Sorouri-side); other days
-    have 2 (Dalian / Shanghai). The third Mon column is still Shanghai —
-    Sorouri's NTN-NR/IoT/NTN sessions happen there during the morning plenary
-    period when Ballroom A is otherwise occupied by the joint AM2 session."""
-    offline_rooms = ['Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)']
-    return offline_rooms[min(offset, 1)]
 
 # -------- Hiroki parser (bold=category, italic=sub-session) --------
 
@@ -982,7 +1040,7 @@ def parse_hiroki_offline_cell(cell, period_start, period_end):
         })
     return sessions
 
-def parse_hiroki_table(tbl, offline):
+def parse_hiroki_table(tbl, offline, online_room, offline_rooms_list):
     rows = tbl.findall('w:tr', NS)
     sessions = []
     period_idx = 0
@@ -1017,15 +1075,15 @@ def parse_hiroki_table(tbl, offline):
                 continue
             if offline:
                 # Offline table: 1 time col + 5 days × 2 rooms = 11 grid columns.
-                # Map grid column → (day, room) instead of trusting cell index,
-                # because cells can have gridSpan>1 (e.g. when a day's two rooms
-                # are merged into one empty cell).
+                # Map grid column → (day, room) by index rather than trusting
+                # cell order (cells can have gridSpan>1).
                 day_idx = (start_col - 1) // 2
                 if day_idx >= len(DAYS):
                     break
                 day = DAYS[day_idx]
                 room_offset = (start_col - 1) % 2
-                room = 'Dalian Ballroom 1 (3F)' if room_offset == 0 else 'Shanghai Function room (3F)'
+                room = offline_rooms_list[min(room_offset,
+                                              len(offline_rooms_list) - 1)]
                 day_sessions = parse_hiroki_offline_cell(cell, p_start, p_end)
                 if day == 'Mon' and this_period == 0:
                     end_align_sessions(day_sessions, p_end)
@@ -1045,7 +1103,7 @@ def parse_hiroki_table(tbl, offline):
                     end_align_sessions(day_sessions, p_end)
                 for s in day_sessions:
                     s['day'] = day
-                    s['room'] = 'Ballroom C (3F)'
+                    s['room'] = online_room
                     sessions.append(s)
     return sessions
 
@@ -1056,10 +1114,32 @@ def parse_hiroki_docx(docx_bytes):
     tables = root.findall('.//w:tbl', NS)
     if not tables:
         return {'online': [], 'offline': []}
-    online = parse_hiroki_table(tables[0], offline=False)
+    # Pull online room name from the Hiroki docx's online-schedule title,
+    # which looks like "...Online Session Schedule (room: RAN1_Brk#2,
+    # Ballroom C (3F))". Falls back to Ballroom C (3F) if not found.
+    online_room = 'Ballroom C (3F)'
+    body = root.find('.//w:body', NS)
+    if body is not None:
+        for p in body:
+            if not p.tag.endswith('}p'):
+                continue
+            text = ''.join(t.text or '' for t in p.findall('.//w:t', NS))
+            m = re.search(
+                r'Online Session Schedule\s*\(room:[^,]*,\s*([^)]+\(\s*\d+F\s*\))',
+                text)
+            if m:
+                online_room = re.sub(r'\s+', ' ', m.group(1)).strip()
+                break
+    # Pull offline rooms (in order) from positioned anchors on the
+    # offline-section header paragraph.
+    _, offline_rooms_list = extract_room_names(docx_bytes)
+    if not offline_rooms_list:
+        offline_rooms_list = ['Dalian Ballroom 1 (3F)',
+                              'Shanghai Function room (3F)']
+    online = parse_hiroki_table(tables[0], False, online_room, offline_rooms_list)
     offline = []
     if len(tables) >= 2:
-        offline = parse_hiroki_table(tables[1], offline=True)
+        offline = parse_hiroki_table(tables[1], True, online_room, offline_rooms_list)
     return {'online': online, 'offline': offline}
 
 # -------- merge --------
@@ -1075,14 +1155,19 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
                 return i
         return None
 
+    # The Sorour-managed room is the middle online room (index 1 of the
+    # all_rooms list, which is [online_left, online_middle, online_right,
+    # offline...] in left-to-right order extracted from the docx).
+    sorour_room = all_rooms[1] if len(all_rooms) >= 2 else None
+
     # Insertion order matters for the (day, room, start, end) dedup at the
     # end — the FIRST occurrence of a key wins. Add Hiroki online (Ballroom C)
-    # and Sorour Ballroom A sessions BEFORE main_sessions so their detailed
+    # and Sorour's room sessions BEFORE main_sessions so their detailed
     # titles/AI items take precedence over main's terser generic copies.
     for s in hiroki_data['online']:
         out.append(s)
     for s in sorour_sessions:
-        if s['room'] == 'Ballroom A (3F)':
+        if s['room'] == sorour_room:
             out.append(s)
     for s in main_sessions:
         out.append(s)
@@ -1244,13 +1329,12 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
         seen.add(key)
         dedup.append(s)
 
-    # Ballroom A is the room Sorour manages: any session there without an
-    # explicit host (typically because the source was the main docx, which
-    # doesn't carry host info) should default to Sorour to match karlla's
-    # rendering. Sessions with an explicit host (Sorouri Mon AM2, Hiroki, etc.)
-    # keep theirs.
+    # The Sorour-managed room: any session there without an explicit host
+    # (typically because the source was the main docx, which doesn't carry
+    # host info) defaults to Sorour to match karlla's rendering. Sessions
+    # with an explicit host (Sorouri Mon AM2, Hiroki, etc.) keep theirs.
     for s in dedup:
-        if s['room'] == 'Ballroom A (3F)' and not s.get('host'):
+        if s['room'] == sorour_room and not s.get('host'):
             s['host'] = 'Sorour'
 
     final = []
@@ -1307,33 +1391,21 @@ def main():
         except Exception as e:
             print("  sorour: parse failed: %s" % e, file=sys.stderr)
 
-    all_rooms = [
-        'Ballroom B (3F)', 'Ballroom A (3F)', 'Ballroom C (3F)',
-        'Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)',
-    ]
-
-    # Verify the hardcoded room names still match what's in the docx.
-    # If they don't (e.g. the next meeting in Maastricht has different rooms),
-    # print a prominent warning so the user knows to update `all_rooms` above.
+    # Build all_rooms dynamically from the docx itself — online rooms first
+    # (left-to-right visual order), then offline rooms. If a future RAN1
+    # meeting renames or reorders rooms inside the docx, the schedule layout
+    # automatically follows; no code change required.
     extracted_online, extracted_offline = extract_room_names(main_docx_bytes)
-    hardcoded_online = set(all_rooms[:3])
-    hardcoded_offline = set(all_rooms[3:])
-    extracted_online_set = set(extracted_online)
-    extracted_offline_set = set(extracted_offline)
-    if extracted_online and extracted_online_set != hardcoded_online:
-        print("", file=sys.stderr)
-        print("⚠️  WARNING: docx ONLINE room names changed — please update build.py!", file=sys.stderr)
-        print("   docx says:  %s" % extracted_online, file=sys.stderr)
-        print("   build.py:   %s" % all_rooms[:3], file=sys.stderr)
-        print("", file=sys.stderr)
-    if extracted_offline and extracted_offline_set != hardcoded_offline:
-        print("", file=sys.stderr)
-        print("⚠️  WARNING: docx OFFLINE room names changed — please update build.py!", file=sys.stderr)
-        print("   docx says:  %s" % extracted_offline, file=sys.stderr)
-        print("   build.py:   %s" % all_rooms[3:], file=sys.stderr)
-        print("", file=sys.stderr)
-    if extracted_online_set == hardcoded_online and extracted_offline_set == hardcoded_offline:
-        print("  room names OK (match docx)", file=sys.stderr)
+    if not extracted_online:
+        extracted_online = ['Ballroom B (3F)',
+                            'Ballroom A (3F)',
+                            'Ballroom C (3F)']
+    if not extracted_offline:
+        extracted_offline = ['Dalian Ballroom 1 (3F)',
+                             'Shanghai Function room (3F)']
+    all_rooms = list(extracted_online) + list(extracted_offline)
+    print("  rooms from docx: %s" % all_rooms, file=sys.stderr)
+
     merged = merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms)
     print("  merged: %d sessions" % len(merged), file=sys.stderr)
 
