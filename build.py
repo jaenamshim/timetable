@@ -349,8 +349,10 @@ def extract_room_names(docx_bytes):
 
     def rooms_in_paragraph(p):
         """Return list of (x_offset, room_name) for every textbox anchor in p
-        that contains a room name. Same room name de-dup'd by keeping the
-        leftmost x."""
+        whose text plausibly names a room. We accept any non-empty, non-
+        numeric-only anchor — room naming conventions vary by venue (e.g.
+        '(3F)' in China, plain names like 'Cettina De Cesare 1' in Italy,
+        etc.). Same room de-dup'd by keeping the leftmost x."""
         candidates = []
         for anc in p.iter(WP + 'anchor'):
             x = None
@@ -364,9 +366,13 @@ def extract_room_names(docx_bytes):
             txt = ''.join(t.text or '' for t in anc.iter(WW + 't')).strip()
             if not txt:
                 continue
-            if not re.search(r'\(\s*\dF\s*\)|Function\s+room', txt, re.I):
-                continue
             txt = re.sub(r'\s+', ' ', txt)
+            # Filter out anchors that are clearly NOT room labels: pure
+            # digits, schedule-title strings, day/time markers.
+            if re.fullmatch(r'\d+', txt):
+                continue
+            if re.search(r'Schedule|RAN1#|Detailed', txt, re.I):
+                continue
             candidates.append((x, txt))
         if not candidates:
             return []
