@@ -30,7 +30,31 @@ NS = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 NS_W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 
 CATEGORIES = {'6GR', 'R20', 'AI 7/8', 'AI 8', 'AI 9', 'AI/ML', 'Maintenance', 'MNTC'}
-HOSTS = {'Hiroki', 'Sorour', 'Sorouri', 'Xiaodong'}
+# All host name variants seen in the docx sources. 'Sorour i' (with space)
+# and 'Sorouri' (no space) are the same person — aliased to canonical 'Sorour'.
+HOSTS = {'Hiroki', 'Sorour', 'Sorouri', 'Sorour i', 'Xiaodong'}
+HOST_ALIASES = {
+    'Sorour i': 'Sorour',
+    'Sorouri':  'Sorour',
+}
+# Each host's primary offline room. When an offline gridSpan>1 cell covers
+# both Dalian and Shanghai with multiple host paragraphs (e.g. Fri 14:30
+# cell "To be assigned by Sorour / To be assigned by Hiroki"), each host's
+# sessions are routed to the room below — matching karlla's behavior.
+HOST_TYPICAL_OFFLINE_ROOM = {
+    'Hiroki':   'Dalian Ballroom 1 (3F)',
+    'Sorour':   'Shanghai Function room (3F)',
+    'Xiaodong': 'Dalian Ballroom 1 (3F)',
+}
+
+def normalize_host(s):
+    """Collapse the 'Sorour i' / 'Sorouri' variants to canonical 'Sorour'.
+    No-op for hosts already in canonical form."""
+    if not s:
+        return s
+    s = re.sub(r'\s+', ' ', s.strip())
+    return HOST_ALIASES.get(s, s)
+
 CAT_MAP = {
     '6GR': '6GR', 'R20': 'R20',
     'AI 7/8': 'AI78', 'AI 8': 'AI78', 'AI 9': 'AI78', 'AI/ML': 'AI78',
@@ -428,7 +452,7 @@ def parse_main_cell(lines, period_start, period_end):
                 except ValueError:
                     continue
                 if label in HOSTS:
-                    host = label
+                    host = normalize_host(label)
                     continue
                 canon_cat = normalize_category(label)
                 if canon_cat is not None:
@@ -456,8 +480,18 @@ def parse_main_cell(lines, period_start, period_end):
                 if canon_cat is not None:
                     cursor = flush(cursor); cat = canon_cat
                 elif sub in HOSTS:
-                    host = sub
+                    host = normalize_host(sub)
                 else:
+                    # "Sorour (TBD)" / "Hiroki (placeholder)" — host name
+                    # followed by a non-numeric parenthetical. PAT_WITH_DUR
+                    # rejects these (it wants a duration in the parens), but
+                    # the host should still be recognized.
+                    m_host = re.match(
+                        r'^(Hiroki|Sorour\s?i?|Sorouri|Xiaodong)\s*\(',
+                        sub)
+                    if m_host:
+                        host = normalize_host(m_host.group(1))
+                        continue
                     sub_stripped = sub.lstrip('.').strip()
                     if re.match(r'^\d+(\.\d+)+', sub_stripped):
                         # Bare AI item — claim 60 min by default (or whatever
@@ -596,6 +630,60 @@ def parse_main_table(tbl, day_to_cols, room_assignment, cell_parser):
             if not dr:
                 continue
             day, room = dr
+
+            # Multi-room offline span: if this gridSpan>1 cell covers more
+            # than one distinct room (e.g. Fri offline col 10 gs=2 spans
+            # Dalian+Shanghai), split the cell's paragraphs at host-name
+            # markers and route each segment to that host's typical offline
+            # room. Matches karlla: cell "To be assigned by Sorour / To be
+            # assigned by Hiroki" → Sorour→Shanghai, Hiroki→Dalian.
+            if span > 1:
+                cols_covered = list(range(start_col, start_col + span))
+                rooms_covered = []
+                for c in cols_covered:
+                    if c in day_to_cols.get(day, []):
+                        off = day_to_cols[day].index(c)
+                        r = room_assignment(day, off)
+                        if r is not None:
+                            rooms_covered.append(r)
+                unique_rooms = list(dict.fromkeys(rooms_covered))
+                if len(unique_rooms) >= 2:
+                    host_pat = re.compile(
+                        r'\b(Hiroki|Sorour\s?i?|Sorouri|Xiaodong)\b')
+                    # Pair each input line with the host name it references
+                    # (if any), then group consecutive same-host lines into
+                    # segments. The order in which hosts appear in the cell
+                    # is irrelevant — each host's segment is routed to its
+                    # typical room, so paragraph order doesn't matter.
+                    segments = []  # list of [host_name, [lines...]]
+                    for line in lines:
+                        m = host_pat.search(line)
+                        h = normalize_host(m.group(1)) if m else None
+                        if segments and segments[-1][0] == h:
+                            segments[-1][1].append(line)
+                        else:
+                            segments.append([h, [line]])
+                    # Only redistribute when at least one segment has a known
+                    # host with a typical room covered by this span.
+                    routable = any(
+                        seg_host and HOST_TYPICAL_OFFLINE_ROOM.get(seg_host)
+                        in unique_rooms for seg_host, _ in segments)
+                    if routable:
+                        for seg_host, seg_lines in segments:
+                            tgt = HOST_TYPICAL_OFFLINE_ROOM.get(seg_host)
+                            if not (tgt and tgt in unique_rooms):
+                                continue
+                            seg_sessions = list(
+                                cell_parser(seg_lines, p_start, p_end))
+                            for s in seg_sessions:
+                                s['day'] = day
+                                s['room'] = tgt
+                                s['span'] = 1
+                                if not s.get('host'):
+                                    s['host'] = seg_host
+                                sessions.append(s)
+                        continue  # skip the default single-cell path below
+
             cell_sessions = list(cell_parser(lines, p_start, p_end))
             # Extract any stashed agenda-line info from parse_main_cell.
             agenda_line = None
@@ -623,10 +711,26 @@ def parse_main_table(tbl, day_to_cols, room_assignment, cell_parser):
                         'category': 'R20',
                         'host':  None,
                     })
+            # Clamp span=1 when all columns covered by gridSpan map to the
+            # same room (e.g. Mon offline col 2 gs=2 covers cols 2,3 which
+            # both clamp to Shanghai). The visual span would otherwise paint
+            # into a non-existent neighbor column.
+            effective_span = span
+            if span > 1:
+                cols_covered = list(range(start_col, start_col + span))
+                rooms_for_cols = set()
+                for c in cols_covered:
+                    if c in day_to_cols.get(day, []):
+                        off = day_to_cols[day].index(c)
+                        r = room_assignment(day, off)
+                        if r is not None:
+                            rooms_for_cols.add(r)
+                if len(rooms_for_cols) <= 1:
+                    effective_span = 1
             for s in cell_sessions:
                 s['day'] = day
                 s['room'] = room
-                s['span'] = span
+                s['span'] = effective_span
                 sessions.append(s)
     return sessions
 
@@ -698,12 +802,10 @@ def parse_sorour_docx(docx_bytes):
 
 def parse_main_docx_room_for_offline(day, offset):
     """Mon offline has 3 cols (Dalian / Shanghai / Sorouri-side); other days
-    have 2 (Dalian / Shanghai). On Monday only, the third offset corresponds
-    to Ballroom A (the room Sorouri uses when the online plenary occupies
-    Ballroom A's online slot). Karlla1220 routes Mon offline col-3 there."""
+    have 2 (Dalian / Shanghai). The third Mon column is still Shanghai —
+    Sorouri's NTN-NR/IoT/NTN sessions happen there during the morning plenary
+    period when Ballroom A is otherwise occupied by the joint AM2 session."""
     offline_rooms = ['Dalian Ballroom 1 (3F)', 'Shanghai Function room (3F)']
-    if day == 'Mon' and offset == 2:
-        return 'Ballroom A (3F)'
     return offline_rooms[min(offset, 1)]
 
 # -------- Hiroki parser (bold=category, italic=sub-session) --------
