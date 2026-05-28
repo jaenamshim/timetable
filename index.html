@@ -221,6 +221,15 @@
 
   .grid-wrap {
     overflow-x: auto;
+    /* Tell mobile browsers: only HORIZONTAL pan is captured by this
+       container — vertical pan falls through to the page. Without this,
+       iOS Safari sometimes intercepts a vertical drag as a "maybe-horizontal
+       gesture", then snaps the view back when it realizes there's no
+       vertical scroll inside. Karlla's table doesn't horizontally scroll,
+       which is why it doesn't hit this bug. */
+    touch-action: pan-x;
+    /* iOS momentum scroll for the horizontal pan. */
+    -webkit-overflow-scrolling: touch;
   }
   .grid {
     display: grid;
@@ -465,7 +474,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
     "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Hiroki_notes/RAN1%23125%20schedule%20for%20Hiroki%20Adhoc2%20sessions_v04_9.docx",
     "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Sorour_notes/RAN1%23125%20Sorour%20online%20and%20offline%20schedules%20-%20v00.docx"
   ],
-  "generated": "2026-05-28 14:14 UTC",
+  "generated": "2026-05-28 14:32 UTC",
   "rooms": [
     "Ballroom B (3F)",
     "Ballroom A (3F)",
