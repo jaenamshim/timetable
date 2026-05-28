@@ -693,19 +693,37 @@ def parse_main_table(tbl, day_to_cols, room_assignment, cell_parser,
                 if len(unique_rooms) >= 2:
                     host_pat = re.compile(
                         r'\b(Hiroki|Sorour\s?i?|Sorouri|Xiaodong)\b')
-                    # Pair each input line with the host name it references
-                    # (if any), then group consecutive same-host lines into
-                    # segments. The order in which hosts appear in the cell
-                    # is irrelevant — each host's segment is routed to its
-                    # typical room, so paragraph order doesn't matter.
+                    # Group lines into host segments. Rule: when a line names
+                    # a new host, start a new segment. Lines without a host
+                    # marker stick with the current segment (the last named
+                    # host), so e.g. "Xiaodong (120) / 6GR / .10.5.2.1 (30)
+                    # / .10.5.2.2 (45)" stays as ONE Xiaodong segment with
+                    # all 5 lines — not split into Xiaodong + None.
                     segments = []  # list of [host_name, [lines...]]
                     for line in lines:
                         m = host_pat.search(line)
                         h = normalize_host(m.group(1)) if m else None
-                        if segments and segments[-1][0] == h:
+                        if h is not None and (
+                                not segments or segments[-1][0] != h):
+                            # New named host — start a fresh segment.
+                            segments.append([h, [line]])
+                        elif segments:
+                            # Continue the current segment (including lines
+                            # with no host marker, like "6GR" cat hints).
                             segments[-1][1].append(line)
                         else:
-                            segments.append([h, [line]])
+                            # Preamble before any host is named — buffer
+                            # under None; will be skipped if no host ever
+                            # appears, otherwise absorbed by first host
+                            # segment below.
+                            segments.append([None, [line]])
+                    # Fold a leading None-preamble segment into the next
+                    # named-host segment so cat hints in the preamble don't
+                    # get lost.
+                    if (len(segments) >= 2 and segments[0][0] is None
+                            and segments[1][0] is not None):
+                        segments[1][1] = segments[0][1] + segments[1][1]
+                        segments.pop(0)
                     # Only redistribute when at least one segment has a known
                     # host with a typical room covered by this span.
                     routable = any(
