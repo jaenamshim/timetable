@@ -283,7 +283,9 @@
     transition: opacity 0.15s, transform 0.05s;
     border-left: 3px solid;
   }
-  .session:hover { transform: translateX(1px); filter: brightness(0.97); }
+  @media (hover: hover) {
+    .session:hover { transform: translateX(1px); filter: brightness(0.97); }
+  }
   .session[data-cat="6GR"]   { background: var(--cat-6GR-bg);   color: var(--cat-6GR-fg);   border-left-color: var(--cat-6GR); }
   .session[data-cat="AI78"]  { background: var(--cat-AI78-bg);  color: var(--cat-AI78-fg);  border-left-color: var(--cat-AI78); }
   .session[data-cat="MAINT"] { background: var(--cat-MAINT-bg); color: var(--cat-MAINT-fg); border-left-color: var(--cat-MAINT); }
@@ -596,6 +598,7 @@ function render() {
     const daySessions = scheduleData.sessions.filter(s => s.day === day);
     const section = document.createElement("section");
     section.className = "day-section";
+    section.dataset.day = day;
     section.innerHTML =
       '<div class="day-title">' + day +
       (day === MEETING_DAY ? ' <span class="today-badge">TODAY</span>' : '') +
@@ -964,14 +967,30 @@ window.addEventListener('scroll', () => {
   _saveTimer = setTimeout(saveViewState, 250);
 }, { passive: true });
 
-// Re-render the NOW line every minute while the meeting is happening, and
-// auto-scroll to it only if the user hasn't touched the page recently.
+// Light-weight per-minute update: reposition the now-line and update the
+// header clock WITHOUT re-rendering the whole grid. The earlier version
+// called render() which wiped main.innerHTML and rebuilt the DOM — on
+// mobile, that briefly collapses the page height during the rebuild and
+// the browser kicks the scroll position to the top, which felt like the
+// page was snapping back mid-drag. This keeps the existing DOM intact and
+// only touches the now-line elements + clock text.
+function refreshNowLines() {
+  document.querySelectorAll('.now-line').forEach(el => el.remove());
+  const PX_PER_MIN = getPxPerMin();
+  document.querySelectorAll('.day-section').forEach(section => {
+    const day = section.dataset.day;
+    if (!day) return;
+    const roomCols = Array.from(section.querySelectorAll('.room-col'));
+    if (roomCols.length) drawNowLine(roomCols, day, PX_PER_MIN);
+  });
+}
+
+// Re-position the NOW line every minute while the meeting is happening.
+// No more auto-scroll-to-now-line: it surprised users who paused mid-read
+// by jumping the page. They can tap the time chip to recenter manually.
 setInterval(() => {
-  render();
-  if (WITHIN_MEETING && Date.now() - lastUserScroll > 20000) {
-    const line = document.querySelector(".now-line");
-    if (line) line.scrollIntoView({ behavior: "smooth", block: "center" });
-  }
+  refreshNowLines();
+  updateHeaderClock();
 }, 60000);
 
 // Auto-refresh the page every 30 minutes. This re-fetches the latest
