@@ -26,6 +26,14 @@ FTP_HIROKI  = FTP_BASE + "/Hiroki_notes/"
 FTP_SOROUR  = FTP_BASE + "/Sorour_notes/"
 MEETINGS_URL = "https://www.3gpp.org/dynareport?code=Meetings-R1.htm"
 
+# Local folder (inside the repo) for manually-provided schedule docx files,
+# e.g. a draft the chair mailed to the reflector before uploading to the
+# sync Inbox. A manual file is used INSTEAD of the FTP one only while its
+# meeting number is strictly newer than the newest matching FTP file; as
+# soon as the chair uploads any file for that (or a later) meeting to the
+# sync folder, the FTP copy takes over automatically.
+MANUAL_DIR = "manual"
+
 NS = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 NS_W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 
@@ -86,8 +94,10 @@ def extract_ai_label(title):
     m = re.search(r'\b(\d+\.\d+(?:\.\d+)*)', title)
     if m:
         return 'AI ' + m.group(1)
-    first = title.split()[0] if title.split() else title
-    return 'AI ' + first
+    # No numeric agenda item in the title (e.g. Rel-20 topic sessions like
+    # 'MIMO' or 'NTN-NR'): don't fabricate an 'AI ' prefix — use the first
+    # word of the title itself as the label/filter key.
+    return title.split()[0] if title.split() else title
 PERIODS_BY_INDEX = {
     0: ('08:30', '10:30'),
     1: ('11:00', '13:00'),
@@ -194,6 +204,81 @@ def find_latest_schedule_url(folder_url, keyword='schedule'):
         return None
     candidates.sort()
     return candidates[-1][1]
+
+def _norm_fn(fn):
+    """Lowercase a filename and treat underscores as spaces, so mailed
+    copies whose spaces/'#' were sanitized (e.g.
+    'Draft_RAN1_126_online_and_offline_schedules_-_v05.docx') still match
+    the same keywords/meeting patterns as the FTP originals."""
+    return urllib.parse.unquote(fn).lower().replace('_', ' ')
+
+def meeting_key(fn):
+    """Extract a comparable (number, is_bis) meeting key from a schedule
+    filename. Accepts 'RAN1#126', 'RAN1 126', 'RAN1_126' (via _norm_fn),
+    with an optional 'bis'/'-bis' suffix. Returns None if no meeting
+    number is found."""
+    if not fn:
+        return None
+    m = re.search(r'ran1\s*#?\s*(\d+)\s*(-?\s*bis)?', _norm_fn(fn))
+    if not m:
+        return None
+    return (int(m.group(1)), 1 if m.group(2) else 0)
+
+def find_manual_schedule(keyword, exclude=()):
+    """Scan MANUAL_DIR for the latest .docx whose normalized name contains
+    `keyword` and none of `exclude`. Same natural-key ordering as
+    find_latest_schedule_url. Returns a local path or None."""
+    import os
+    if not os.path.isdir(MANUAL_DIR):
+        return None
+    candidates = []
+    for fn in os.listdir(MANUAL_DIR):
+        if not fn.lower().endswith('.docx'):
+            continue
+        norm = _norm_fn(fn)
+        if keyword not in norm or any(x in norm for x in exclude):
+            continue
+        key = tuple(int(t) if t.isdigit() else t
+                    for t in re.split(r'(\d+)', norm))
+        candidates.append((key, os.path.join(MANUAL_DIR, fn)))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[-1][1]
+
+def choose_source(ftp_url, manual_keyword, label, manual_exclude=()):
+    """Pick between the latest FTP file and a local manual override for one
+    source (main/hiroki/sorour).
+
+    Rule: the manual file wins ONLY if its meeting number is strictly newer
+    than the FTP file's (or there is no FTP file at all). For the SAME
+    meeting the FTP copy always wins, because mailed drafts and sync-Inbox
+    uploads use independent version numbering (a mailed 'Draft ... v05' may
+    predate the Inbox 'v00'), and the Inbox copy is authoritative once it
+    exists. This also means an override expires by itself when the chair
+    starts uploading the new meeting's files — no cleanup commit needed.
+
+    Returns (loader, filename, origin) where loader() yields the docx
+    bytes and origin is 'manual' or 'ftp'; (None, None, None) if neither
+    source has a file."""
+    ftp_fn = urllib.parse.unquote(ftp_url.split('/')[-1]) if ftp_url else None
+    man_path = find_manual_schedule(manual_keyword, manual_exclude)
+    man_fn = man_path.replace('\\', '/').split('/')[-1] if man_path else None
+    use_manual = False
+    if man_path:
+        if not ftp_url:
+            use_manual = True
+        else:
+            man_key, ftp_key = meeting_key(man_fn), meeting_key(ftp_fn)
+            if man_key and (not ftp_key or man_key > ftp_key):
+                use_manual = True
+    if use_manual:
+        print("  %s: manual override %s supersedes FTP %s"
+              % (label, man_fn, ftp_fn), file=sys.stderr)
+        return (lambda: open(man_path, 'rb').read()), man_fn, 'manual'
+    if ftp_url:
+        return (lambda: fetch(ftp_url)), ftp_fn, 'ftp'
+    return None, None, None
 
 def location_to_timezone(loc):
     if not loc:
@@ -1374,46 +1459,73 @@ def merge_three(main_sessions, hiroki_data, sorour_sessions, all_rooms):
 
 def main():
     print("Scanning 3GPP FTP for latest schedule files...", file=sys.stderr)
-    main_url   = find_latest_schedule_url(FTP_MAIN, 'online and offline schedules')
-    hiroki_url = find_latest_schedule_url(FTP_HIROKI, 'schedule')
-    sorour_url = find_latest_schedule_url(FTP_SOROUR, 'schedule')
+    main_ftp   = find_latest_schedule_url(FTP_MAIN, 'online and offline schedules')
+    hiroki_ftp = find_latest_schedule_url(FTP_HIROKI, 'schedule')
+    sorour_ftp = find_latest_schedule_url(FTP_SOROUR, 'schedule')
 
-    if not main_url:
-        print("ERROR: no main schedule docx found.", file=sys.stderr)
+    # Per-source choice between FTP and a manual/ override. The manual
+    # keywords are disjoint on purpose: a mailed main schedule must not be
+    # picked up as a Hiroki/Sorour override and vice versa.
+    main_load, main_fn, main_origin = choose_source(
+        main_ftp, 'online and offline schedules', 'main',
+        manual_exclude=('hiroki', 'sorour'))
+    hiroki_load, hiroki_fn, hiroki_origin = choose_source(
+        hiroki_ftp, 'hiroki', 'hiroki')
+    sorour_load, sorour_fn, sorour_origin = choose_source(
+        sorour_ftp, 'sorour', 'sorour')
+
+    if not main_load:
+        print("ERROR: no main schedule docx found (FTP or manual/).", file=sys.stderr)
         sys.exit(1)
 
-    main_fn   = urllib.parse.unquote(main_url.split('/')[-1])
-    hiroki_fn = urllib.parse.unquote(hiroki_url.split('/')[-1]) if hiroki_url else None
-    sorour_fn = urllib.parse.unquote(sorour_url.split('/')[-1]) if sorour_url else None
-    print("  main:   %s" % main_fn, file=sys.stderr)
-    print("  hiroki: %s" % hiroki_fn, file=sys.stderr)
-    print("  sorour: %s" % sorour_fn, file=sys.stderr)
+    print("  main:   %s [%s]" % (main_fn, main_origin), file=sys.stderr)
+    print("  hiroki: %s [%s]" % (hiroki_fn, hiroki_origin), file=sys.stderr)
+    print("  sorour: %s [%s]" % (sorour_fn, sorour_origin), file=sys.stderr)
 
-    # Need to be specific: the filename starts "RAN1#NNN...", not just any digit run.
-    meeting_match = re.search(r'#(\d+(?:-?bis)?)', main_fn)
-    meeting_num = meeting_match.group(1) if meeting_match else '125'
-    meeting_label_match = re.match(r'^([A-Z0-9#]+)', main_fn)
-    meeting_label = meeting_label_match.group(1) if meeting_label_match else 'RAN1#' + meeting_num
+    # Meeting number from the selected main file. meeting_key() tolerates
+    # both 'RAN1#126' (FTP) and sanitized 'RAN1_126' (mailed copy) forms.
+    sel_key = meeting_key(main_fn)
+    if sel_key:
+        meeting_num = str(sel_key[0]) + ('-bis' if sel_key[1] else '')
+    else:
+        meeting_match = re.search(r'#(\d+(?:-?bis)?)', main_fn)
+        meeting_num = meeting_match.group(1) if meeting_match else '125'
+    meeting_label = 'RAN1#' + meeting_num
 
-    main_docx_bytes = fetch(main_url)
+    def same_meeting(fn, label):
+        """Guard: never merge a Hiroki/Sorour file from a DIFFERENT meeting
+        into the selected main schedule (e.g. manual #126 main while the
+        sync Inbox still holds #125 host schedules)."""
+        k = meeting_key(fn)
+        if k and sel_key and k != sel_key:
+            print("  %s: %s belongs to another meeting -> skipped"
+                  % (label, fn), file=sys.stderr)
+            return False
+        return True
+
+    main_docx_bytes = main_load()
     main_sessions = parse_main_docx(main_docx_bytes)
     print("  main:   %d sessions" % len(main_sessions), file=sys.stderr)
 
     hiroki_data = {'online': [], 'offline': []}
-    if hiroki_url:
+    if hiroki_load and same_meeting(hiroki_fn, 'hiroki'):
         try:
-            hiroki_data = parse_hiroki_docx(fetch(hiroki_url))
+            hiroki_data = parse_hiroki_docx(hiroki_load())
             print("  hiroki: %d online + %d offline" % (len(hiroki_data['online']), len(hiroki_data['offline'])), file=sys.stderr)
         except Exception as e:
             print("  hiroki: parse failed: %s" % e, file=sys.stderr)
+    else:
+        hiroki_fn = None
 
     sorour_sessions = []
-    if sorour_url:
+    if sorour_load and same_meeting(sorour_fn, 'sorour'):
         try:
-            sorour_sessions = parse_sorour_docx(fetch(sorour_url))
+            sorour_sessions = parse_sorour_docx(sorour_load())
             print("  sorour: %d sessions" % len(sorour_sessions), file=sys.stderr)
         except Exception as e:
             print("  sorour: parse failed: %s" % e, file=sys.stderr)
+    else:
+        sorour_fn = None
 
     # Build all_rooms dynamically from the docx itself — online rooms first
     # (left-to-right visual order), then offline rooms. If a future RAN1
@@ -1449,8 +1561,19 @@ def main():
             'timezone': 'UTC',
         }
 
-    sources = [main_fn] + ([hiroki_fn] if hiroki_fn else []) + ([sorour_fn] if sorour_fn else [])
-    source_urls = [main_url] + ([hiroki_url] if hiroki_url else []) + ([sorour_url] if sorour_url else [])
+    def src_entry(fn, origin, ftp_url):
+        if origin == 'manual':
+            # Served by GitHub Pages from the repo itself.
+            return ('[manual] ' + fn, MANUAL_DIR + '/' + fn)
+        return (fn, ftp_url)
+
+    entries = [src_entry(main_fn, main_origin, main_ftp)]
+    if hiroki_fn:
+        entries.append(src_entry(hiroki_fn, hiroki_origin, hiroki_ftp))
+    if sorour_fn:
+        entries.append(src_entry(sorour_fn, sorour_origin, sorour_ftp))
+    sources = [e[0] for e in entries]
+    source_urls = [e[1] for e in entries]
 
     schedule_data = {
         'meeting': meeting_label,

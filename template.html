@@ -722,7 +722,7 @@ function render() {
         (s.host ? ' <span style="opacity:.8;font-weight:400">\u00b7 ' + s.host + '</span>' : '') +
         '</div>' +
         '<div class="s-meta">' + s.start + '\u2013' + s.end + ' (' + dur + 'm)</div>' +
-        '<div class="s-ai">' + s.ai + '</div>';
+        (s.ai && s.ai !== s.title ? '<div class="s-ai">' + s.ai + '</div>' : '');
       const catOn = state.cats[s.category];
       const aiOn = state.aiFilter[s.ai] !== false;
       if (!catOn || !aiOn) div.classList.add("dim");
