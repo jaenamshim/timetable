@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#f6f5f1" />
 <title>RAN1 Meeting Schedule</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,9 +35,10 @@
     --cat-MAINT-fg: #5c3210;
     --cat-R20-fg:   #1d3358;
 
-    --row-h: 28px;
+    /* 16px per 10-min = 1.6px/min: a full 08:30-19:30 day fits one screen
+       (~1,050px + header), same density as karlla1220's 3GPPSchedule. */
+    --row-h: 16px;
     --label-w: 56px;
-    --col-min-w: 96px;
 
     --dim-opacity: 0.18;
   }
@@ -53,8 +55,7 @@
   }
 
   header {
-    padding: 18px 24px 12px;
-    border-bottom: 1px solid var(--line);
+    padding: 16px 24px 8px;
     background: var(--surface);
   }
   h1 { margin: 0 0 4px; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
@@ -64,6 +65,24 @@
   }
   .meta a { color: inherit; }
   .meta .sep { margin: 0 6px; opacity: 0.6; }
+  /* Source docx links get their own line, exempt from the mobile meta
+     clamp: the tail of the filename (title + version, e.g. "...sessions
+     _v07_1.docx") is what tells you whether the chair posted a new rev, so
+     names are shown in full and simply wrap — never ellipsized. */
+  .sources {
+    font-size: 10px;
+    color: var(--muted);
+    font-family: 'IBM Plex Mono', monospace;
+    margin-top: 4px;
+    line-height: 1.7;
+  }
+  .sources a {
+    color: inherit;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 2px;
+  }
+  .sources a:active, .sources a:hover { color: var(--ink); }
+  .sources .src-sep { margin: 0 6px; opacity: 0.5; }
   .clock {
     display: inline-block;
     background: #f0eee8;
@@ -73,9 +92,28 @@
     color: var(--ink);
   }
 
-  .controls { display: flex; flex-direction: column; gap: 8px; }
+  .controls {
+    display: flex; flex-direction: column; gap: 8px;
+    /* Sticky bar: day tabs + filters stay reachable while scrolled into the
+       grid — the single most frequent interaction on a phone. Its measured
+       height is published as --controls-h (see JS) so the sticky room
+       headers stack right below it. */
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    background: var(--surface);
+    padding: 8px 24px 10px;
+    border-bottom: 1px solid var(--line);
+  }
   .controls-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .day-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+
+  /* touch-action:manipulation kills the 300ms double-tap-zoom delay on
+     buttons; the tap-highlight flash looks broken on the dense grid. */
+  .chip, .session, .panel-toggle {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
 
   .chip.day {
     padding: 7px 16px;
@@ -195,8 +233,13 @@
   }
   .info-banner b { color: var(--ink); }
 
-  .day-section { margin-bottom: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  /* NOTE: no overflow:hidden here. An overflow:hidden ancestor makes
+     position:sticky resolve against THIS (never-scrolling) box instead of
+     the viewport, which pushed the sticky room headers down INTO the grid
+     by ~var(--controls-h). Corner rounding is done on .day-title instead. */
+  .day-section { margin-bottom: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
   .day-title {
+    border-radius: 5px 5px 0 0;
     padding: 10px 16px;
     border-bottom: 1px solid var(--line);
     font-weight: 600;
@@ -219,21 +262,31 @@
     vertical-align: middle;
   }
 
-  .grid-wrap {
-    overflow-x: auto;
-    /* Tell mobile browsers: only HORIZONTAL pan is captured by this
-       container — vertical pan falls through to the page. Without this,
-       iOS Safari sometimes intercepts a vertical drag as a "maybe-horizontal
-       gesture", then snaps the view back when it realizes there's no
-       vertical scroll inside. Karlla's table doesn't horizontally scroll,
-       which is why it doesn't hit this bug. */
-    touch-action: pan-x;
-    /* iOS momentum scroll for the horizontal pan. */
-    -webkit-overflow-scrolling: touch;
+  /* No horizontal scroll container anywhere: columns compress to fit
+     (minmax(0,1fr)). This removes the iOS "maybe-horizontal gesture" bug
+     class entirely — with no h-scrollable ancestor, position:sticky on the
+     header row works against the page scroll on BOTH desktop and mobile. */
+  .room-head, .time-head {
+    position: sticky;
+    top: var(--controls-h, 0px); /* sit just below the sticky controls bar */
+    z-index: 30;
+  }
+  /* The leftmost time axis is pinned: sticky-left keeps it on screen in any
+     horizontally-scrolling context (a no-op when everything already fits),
+     with an opaque background so content slides UNDER it, not through it. */
+  .time-col {
+    position: sticky;
+    left: 0;
+    z-index: 20;
+    background: var(--surface);
+  }
+  .time-head {
+    left: 0;
+    z-index: 35; /* above both room heads and the time column */
   }
   .grid {
     display: grid;
-    grid-template-columns: var(--label-w) repeat(var(--n-rooms), minmax(var(--col-min-w), 1fr));
+    grid-template-columns: var(--label-w) repeat(var(--n-rooms), minmax(0, 1fr));
     position: relative;
     min-width: 100%;
   }
@@ -284,14 +337,28 @@
   .session {
     position: absolute;
     left: 2px; right: 2px;
-    padding: 4px 6px;
+    padding: 2px 5px;
     border-radius: 3px;
     font-size: 11px;
+    line-height: 1.25;
     overflow: hidden;
     cursor: pointer;
     transition: opacity 0.15s, transform 0.05s;
     border-left: 3px solid;
   }
+  /* Graduated degradation for short slots (RAN1 schedules are full of
+     20-30 min fragments). Mirrors karlla's short-session/tiny-session:
+     <35 min: drop the AI line, single-line ellipsized title.
+     <25 min: additionally drop the time line; title only. */
+  .session.short { padding: 1px 4px; }
+  .session.short .s-ai { display: none; }
+  .session.short .s-title {
+    font-size: 10px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .session.short .s-meta { font-size: 9px; }
+  .session.tiny .s-meta { display: none; }
+  .session.tiny .s-title { font-size: 9px; }
   @media (hover: hover) {
     .session:hover { transform: translateX(1px); filter: brightness(0.97); }
   }
@@ -377,28 +444,59 @@
   footer { text-align: center; padding: 16px; color: var(--muted); font-size: 11px; line-height: 1.6; }
   footer a { color: inherit; }
 
-  /* Mobile: tighter columns + vertical density so the table fits the phone
-     with much less horizontal scrolling. */
+  /* Mobile: ALL rooms fit the viewport — no horizontal scrolling at all.
+     At ~390px that's ~66px per room column; block text is heavily truncated
+     but the grid's job on a phone is the conflict overview — tap a block for
+     the full detail modal. Killing the h-scroll container also removes the
+     whole iOS pan-x gesture problem class and lets sticky headers work. */
   @media (max-width: 768px) {
     :root {
-      --row-h: 22px;
-      --label-w: 44px;
-      /* Each room column sized so EXACTLY 3 fit on a phone screen alongside
-         the time column. On larger phone-landscape / small-tablet widths the
-         min() cap kicks in so columns don't blow up and all 5 can still fit. */
-      --col-min-w: min(calc((100vw - var(--label-w) - 28px) / 3), 120px);
+      --row-h: 14px;
+      --label-w: 38px;
     }
-    header { padding: 12px 12px 10px; }
+    header { padding: 10px 12px 8px; }
     h1 { font-size: 17px; }
-    .meta { font-size: 10px; }
-    main { padding: 10px 12px 60px; }
-    .room-head { font-size: 10px; padding: 6px 4px; }
-    .time-label { font-size: 9px; }
-    .session { font-size: 10px; padding: 3px 5px; }
-    .session .s-meta { font-size: 9px; }
-    .session .s-ai { font-size: 9px; }
+    .meta {
+      font-size: 10px;
+      /* Sources list can run 3+ lines on a phone; clamp to 2. */
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .controls { padding: 6px 12px 8px; }
+    main { padding: 8px 8px 72px; }
+    .room-head {
+      font-size: 8px;
+      padding: 4px 2px;
+      /* Two-line wrap beats a 3-char ellipsis for names like
+         "0.6/0.7 Madrid/Lisbon". */
+      white-space: normal;
+      line-height: 1.15;
+      word-break: break-word;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+    .time-label { font-size: 8px; right: 3px; }
+    .session { font-size: 9px; padding: 1px 3px; border-left-width: 2px; }
+    .session .s-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .session .s-meta { font-size: 8px; }
+    .session .s-ai { font-size: 8px; margin-top: 1px; }
+    .session.short .s-title, .session.tiny .s-title { font-size: 8px; }
+    .session.short .s-meta { display: none; }
     .chip { padding: 4px 9px; font-size: 11px; }
-    .panel { width: 280px; }
+    .panel { width: min(300px, 86vw); }
+    /* Detail modal as a bottom sheet — thumb-friendly. */
+    .modal-backdrop { align-items: flex-end; padding: 0; }
+    .modal {
+      max-width: none;
+      border-radius: 14px 14px 0 0;
+      border-left: none; border-right: none; border-bottom: none;
+      max-height: 75vh;
+      padding-bottom: calc(20px + env(safe-area-inset-bottom));
+    }
+    .panel-toggle { bottom: calc(14px + env(safe-area-inset-bottom)); }
   }
 </style>
 </head>
@@ -407,24 +505,26 @@
 <header>
   <h1 id="title">Loading...</h1>
   <div class="meta" id="meta">Loading...</div>
-  <div class="controls" id="controls">
-    <div class="controls-row">
-      <button class="chip cat" data-cat="6GR"   data-on="true">6GR</button>
-      <button class="chip cat" data-cat="AI78"  data-on="true">AI 7/8</button>
-      <button class="chip cat" data-cat="MAINT" data-on="true">Maintenance</button>
-      <button class="chip cat" data-cat="R20"   data-on="true">R20</button>
-      <span class="divider"></span>
-      <button class="chip now" id="now-btn">NOW</button>
-    </div>
-    <div class="day-tabs">
-      <button class="chip day" data-day="Mon" data-on="true">Mon</button>
-      <button class="chip day" data-day="Tue" data-on="true">Tue</button>
-      <button class="chip day" data-day="Wed" data-on="true">Wed</button>
-      <button class="chip day" data-day="Thu" data-on="true">Thu</button>
-      <button class="chip day" data-day="Fri" data-on="true">Fri</button>
-    </div>
-  </div>
+  <div class="sources" id="sources"></div>
 </header>
+
+<div class="controls" id="controls">
+  <div class="controls-row">
+    <button class="chip cat" data-cat="6GR"   data-on="true">6GR</button>
+    <button class="chip cat" data-cat="AI78"  data-on="true">AI 7/8</button>
+    <button class="chip cat" data-cat="MAINT" data-on="true">Maintenance</button>
+    <button class="chip cat" data-cat="R20"   data-on="true">R20</button>
+    <span class="divider"></span>
+    <button class="chip now" id="now-btn">NOW</button>
+  </div>
+  <div class="day-tabs">
+    <button class="chip day" data-day="Mon" data-on="true">Mon</button>
+    <button class="chip day" data-day="Tue" data-on="true">Tue</button>
+    <button class="chip day" data-day="Wed" data-on="true">Wed</button>
+    <button class="chip day" data-day="Thu" data-on="true">Thu</button>
+    <button class="chip day" data-day="Fri" data-on="true">Fri</button>
+  </div>
+</div>
 
 <main id="main"></main>
 
@@ -542,7 +642,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
     "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Hiroki_notes/RAN1%23126%20schedule%20for%20Hiroki%20Adhoc2%20sessions_v07_1.docx",
     "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Sorour_notes/RAN1%23126%20Sorour%20sessions%20online%20and%20offline%20schedules%20-%20v00.docx"
   ],
-  "generated": "2026-08-26 16:39 UTC",
+  "generated": "2026-08-26 17:08 UTC",
   "rooms": [
     "Expo Foyer",
     "Praetorium",
@@ -709,7 +809,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "13:00",
       "title": "AI 6/8.1",
       "ai": "AI 6/8.1",
-      "category": "R20",
+      "category": "AI78",
       "host": "Sorour",
       "day": "Tue",
       "room": 1,
@@ -731,7 +831,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "13:00",
       "title": "AI 6/8.1",
       "ai": "AI 6/8.1",
-      "category": "R20",
+      "category": "AI78",
       "host": "Sorour",
       "day": "Wed",
       "room": 1,
@@ -742,7 +842,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "11:40",
       "title": "AI 6/8.1",
       "ai": "AI 6/8.1",
-      "category": "R20",
+      "category": "AI78",
       "host": "Sorour",
       "day": "Thu",
       "room": 1,
@@ -1171,7 +1271,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "09:50",
       "title": "AI 7/8.2",
       "ai": "AI 7/8.2",
-      "category": "R20",
+      "category": "AI78",
       "host": null,
       "day": "Thu",
       "room": 2,
@@ -1490,7 +1590,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "15:00",
       "title": "TEI",
       "ai": "TEI",
-      "category": "R20",
+      "category": "MAINT",
       "host": null,
       "day": "Tue",
       "room": 2,
@@ -1501,7 +1601,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "15:50",
       "title": "AI 7/8.2",
       "ai": "AI 7/8.2",
-      "category": "R20",
+      "category": "AI78",
       "host": null,
       "day": "Tue",
       "room": 2,
@@ -1534,7 +1634,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "16:30",
       "title": "AI 7/8.2",
       "ai": "AI 7/8.2",
-      "category": "R20",
+      "category": "AI78",
       "host": null,
       "day": "Wed",
       "room": 2,
@@ -1809,7 +1909,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "09:30",
       "title": "AI/ML",
       "ai": "AI/ML",
-      "category": "AI78",
+      "category": "R20",
       "host": "Xiaodong",
       "day": "Tue",
       "room": 3,
@@ -1897,7 +1997,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "10:30",
       "title": "AI/ML",
       "ai": "AI/ML",
-      "category": "AI78",
+      "category": "R20",
       "host": "Sorour",
       "day": "Wed",
       "room": 4,
@@ -1941,7 +2041,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "09:30",
       "title": "AI/ML",
       "ai": "AI/ML",
-      "category": "AI78",
+      "category": "R20",
       "host": "Xiaodong",
       "day": "Thu",
       "room": 4,
@@ -1996,7 +2096,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "10:30",
       "title": "10.3.x",
       "ai": "AI 10.3",
-      "category": "R20",
+      "category": "6GR",
       "host": "Sorour",
       "day": "Fri",
       "room": 4,
@@ -2711,7 +2811,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
       "end": "17:40",
       "title": "AI/ML",
       "ai": "AI/ML",
-      "category": "AI78",
+      "category": "R20",
       "host": "Xiaodong",
       "day": "Thu",
       "room": 3,
@@ -2885,6 +2985,93 @@ const MEETING_DAY = (() => {
 
 /* Persist active day + scroll position across page reloads (e.g. the 30-min
    auto-refresh). sessionStorage scope = this tab only. */
+/* Persist FILTER state (category chips, AI checkboxes, dim opacity) in two
+   layers, following karlla1220's model:
+   - localStorage: per-browser, survives closing the tab. "My filters are
+     just how I left them on this phone/laptop."
+   - URL hash (#f=...): shareable/bookmarkable. Encodes only OFF items so
+     the default state keeps a clean URL. Hash wins over localStorage when
+     present, so a shared link always shows what the sender saw. */
+const FILTER_KEY = 'ran1_filters';
+const DIM_DEFAULT = 18; // percent, must match the slider's initial value
+
+function currentDimPct() {
+  const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dim-opacity'));
+  return isNaN(v) ? DIM_DEFAULT : Math.round(v * 100);
+}
+
+function collectFilterState() {
+  return {
+    catsOff: Object.keys(state.cats).filter(c => !state.cats[c]),
+    aisOff:  Object.keys(state.aiFilter).filter(a => state.aiFilter[a] === false),
+    dim:     currentDimPct(),
+  };
+}
+
+// encodeURIComponent leaves ',' unescaped, but ',' is our token separator
+// and AI names contain literal commas ("AI 10.5.4.1, 10.5.4.3").
+const encTok = (s) => encodeURIComponent(s).replace(/,/g, '%2C');
+
+function saveFilters() {
+  const f = collectFilterState();
+  try { localStorage.setItem(FILTER_KEY, JSON.stringify(f)); } catch (e) {}
+  // Mirror to URL hash
+  const parts = [];
+  f.catsOff.forEach(c => parts.push('c:' + encTok(c)));
+  f.aisOff.forEach(a => parts.push('a:' + encTok(a)));
+  if (f.dim !== DIM_DEFAULT) parts.push('o:' + f.dim);
+  try {
+    history.replaceState(null, '',
+      parts.length ? '#f=' + parts.join(',') : location.pathname + location.search);
+  } catch (e) {}
+}
+
+function loadFiltersFromHash() {
+  const h = location.hash;
+  if (!h || !h.startsWith('#f=')) return null;
+  const f = { catsOff: [], aisOff: [], dim: DIM_DEFAULT };
+  h.slice(3).split(',').forEach(tok => {
+    const i = tok.indexOf(':');
+    if (i < 0) return;
+    const type = tok.slice(0, i), val = decodeURIComponent(tok.slice(i + 1));
+    if (type === 'c') f.catsOff.push(val);
+    else if (type === 'a') f.aisOff.push(val);
+    else if (type === 'o') { const n = parseInt(val, 10); if (!isNaN(n)) f.dim = Math.min(100, Math.max(0, n)); }
+  });
+  return f;
+}
+
+function loadFiltersFromStorage() {
+  try {
+    const raw = localStorage.getItem(FILTER_KEY);
+    if (!raw) return null;
+    const f = JSON.parse(raw);
+    return {
+      catsOff: Array.isArray(f.catsOff) ? f.catsOff : [],
+      aisOff:  Array.isArray(f.aisOff)  ? f.aisOff  : [],
+      dim:     typeof f.dim === 'number' ? f.dim : DIM_DEFAULT,
+    };
+  } catch (e) { return null; }
+}
+
+// AI names aren't known until buildAIFilter() runs (they come from the
+// injected data), so stash the restored OFF-list for it to apply.
+let RESTORED_AI_OFF = [];
+function applyDimPct(pct) {
+  document.documentElement.style.setProperty('--dim-opacity', (pct / 100).toFixed(2));
+  const slider = document.getElementById('opacity-slider');
+  const label  = document.getElementById('opacity-val');
+  if (slider) slider.value = pct;
+  if (label)  label.textContent = pct + '%';
+}
+(function restoreFilters() {
+  const f = loadFiltersFromHash() || loadFiltersFromStorage();
+  if (!f) return;
+  f.catsOff.forEach(c => { if (c in state.cats) state.cats[c] = false; });
+  RESTORED_AI_OFF = f.aisOff;
+  if (f.dim !== DIM_DEFAULT) applyDimPct(f.dim);
+})();
+
 const VIEW_STATE_KEY = 'ran1_view_state';
 function saveViewState() {
   const activeDay = DAYS.find(d => state.days[d]) || null;
@@ -3068,6 +3255,8 @@ function render() {
       div.style.top = top + "px";
       div.style.height = (h - 2) + "px";
       const dur = toMin(s.end) - toMin(s.start);
+      if (dur < 25) div.classList.add("tiny", "short");
+      else if (dur < 35) div.classList.add("short");
       div.innerHTML =
         '<div class="s-title">' + s.title +
         (s.host ? ' <span style="opacity:.8;font-weight:400">\u00b7 ' + s.host + '</span>' : '') +
@@ -3153,6 +3342,21 @@ function openSessionModal(s, coveredRooms) {
     .map(escapeHtml).join('<br>');
   const catLabel = escapeHtml(CAT_DISPLAY[s.category] || s.category);
 
+  // Resolve official agenda item titles (from the meeting's agenda.csv,
+  // injected as scheduleData.aiTitles) for every AI number found in the
+  // session's ai/title strings: "AI 6/8.1" -> 6, 8.1; "AI 1, 2, 3" -> 1,2,3.
+  let agendaRows = '';
+  const aiTitles = scheduleData.aiTitles || {};
+  const nums = [...new Set(((s.ai || '') + ' ' + (s.title || ''))
+    .split(/[^0-9.]+/).filter(Boolean)
+    .map(n => n.replace(/\.$/, ''))
+    .filter(n => aiTitles[n]))];
+  if (nums.length) {
+    agendaRows = '<dt>Agenda</dt><dd>' + nums.map(n =>
+      '<b style="font-weight:600">' + escapeHtml(n) + '</b> ' +
+      escapeHtml(aiTitles[n])).join('<br>') + '</dd>';
+  }
+
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.innerHTML =
@@ -3168,6 +3372,7 @@ function openSessionModal(s, coveredRooms) {
         '<dt>Room</dt><dd>' + roomList + '</dd>' +
         (s.host ? ('<dt>Host</dt><dd>' + escapeHtml(s.host) + '</dd>') : '') +
         (s.ai   ? ('<dt>AI Item</dt><dd>' + escapeHtml(s.ai) + '</dd>') : '') +
+        agendaRows +
       '</dl>' +
     '</div>';
   document.body.appendChild(backdrop);
@@ -3188,6 +3393,9 @@ function openSessionModal(s, coveredRooms) {
 function buildAIFilter() {
   const ais = [...new Set(scheduleData.sessions.map(s => s.ai))].sort();
   ais.forEach(ai => { if (state.aiFilter[ai] === undefined) state.aiFilter[ai] = true; });
+  // Apply the OFF-list restored from URL hash / localStorage. Unknown names
+  // (e.g. from a previous meeting's schedule) are silently ignored.
+  RESTORED_AI_OFF.forEach(ai => { if (ai in state.aiFilter) state.aiFilter[ai] = false; });
   const grp = document.getElementById("ai-filter-group");
   grp.innerHTML = "<div style='font-size:11px;color:var(--muted);margin-bottom:6px;'>AGENDA ITEMS</div>";
   ais.forEach(ai => {
@@ -3199,6 +3407,7 @@ function buildAIFilter() {
   grp.addEventListener("change", e => {
     if (e.target.matches("input[data-ai]")) {
       state.aiFilter[e.target.dataset.ai] = e.target.checked;
+      saveFilters();
       render();
     }
   });
@@ -3214,6 +3423,7 @@ document.getElementById("controls").addEventListener("click", e => {
   if (cat) {
     state.cats[cat] = e.target.dataset.on !== "true";
     e.target.dataset.on = state.cats[cat];
+    saveFilters();
     render();
   } else if (day) {
     // Tab behavior: select only this day, deselect all others.
@@ -3243,17 +3453,19 @@ document.getElementById("panel-close").addEventListener("click", () => {
 document.getElementById("select-all").addEventListener("click", () => {
   Object.keys(state.aiFilter).forEach(k => state.aiFilter[k] = true);
   document.querySelectorAll("#ai-filter-group input").forEach(i => i.checked = true);
+  saveFilters();
   render();
 });
 document.getElementById("deselect-all").addEventListener("click", () => {
   Object.keys(state.aiFilter).forEach(k => state.aiFilter[k] = false);
   document.querySelectorAll("#ai-filter-group input").forEach(i => i.checked = false);
+  saveFilters();
   render();
 });
 document.getElementById("opacity-slider").addEventListener("input", (e) => {
   const pct = parseInt(e.target.value, 10);
-  document.documentElement.style.setProperty('--dim-opacity', (pct / 100).toFixed(2));
-  document.getElementById("opacity-val").textContent = pct + "%";
+  applyDimPct(pct);
+  saveFilters();
 });
 
 // Populate title + meta from data
@@ -3271,24 +3483,35 @@ if (mi.city || mi.startDate) {
   metaHtml += '<span class="sep">\u00b7</span>';
 }
 metaHtml += 'Now: <span class="clock" id="clock-text">\u2026</span>';
-if (scheduleData.sources && scheduleData.sources.length) {
-  metaHtml += '<span class="sep">\u00b7</span>Sources: ';
-  metaHtml += scheduleData.sources.map((fn, i) => {
-    const url = scheduleData.sourceUrls[i] || '#';
-    const shown = fn.length > 40 ? fn.slice(0, 37) + '\u2026' : fn;
-    return '<a href="' + url + '" target="_blank" rel="noopener">' + shown + '</a>';
-  }).join(', ');
-}
 if (scheduleData.generated) {
   metaHtml += '<span class="sep">\u00b7</span>Updated: ' + scheduleData.generated;
 }
 metaEl.innerHTML = metaHtml;
+
+// Source docx links on their own line. The filename TAIL (title + version)
+// is the informative part — "RAN1#126" prefixes are redundant under the
+// page title, so strip them and show the rest in full (wrapping, never
+// truncated) so a new chair revision (v00 -> v01) is visible at a glance.
+const srcEl = document.getElementById('sources');
+if (srcEl && scheduleData.sources && scheduleData.sources.length) {
+  srcEl.innerHTML = 'Sources: ' + scheduleData.sources.map((fn, i) => {
+    const url = scheduleData.sourceUrls[i] || '#';
+    const shown = fn.replace(/^RAN1\s*#?\s*\d+\s*(bis)?\s*/i, '');
+    return '<a href="' + url + '" target="_blank" rel="noopener" title="' +
+           escapeHtml(fn) + '">' + escapeHtml(shown) + '</a>';
+  }).join('<span class="src-sep">\u00b7</span>');
+}
 
 buildAIFilter();
 
 // Set the active day chip to DEFAULT_DAY (= MEETING_DAY if within meeting, else Mon)
 document.querySelectorAll(".chip.day").forEach(btn => {
   btn.dataset.on = (btn.dataset.day === DEFAULT_DAY) ? "true" : "false";
+});
+
+// Sync category chips with (possibly restored) filter state
+document.querySelectorAll(".chip.cat").forEach(btn => {
+  btn.dataset.on = state.cats[btn.dataset.cat] ? "true" : "false";
 });
 
 if (!WITHIN_MEETING) {
@@ -3360,6 +3583,28 @@ setInterval(() => {
   saveViewState();
   location.reload();
 }, 30 * 60 * 1000);
+
+// Mobile browsers suspend timers in background tabs, so the interval above
+// never fires while the phone is pocketed. When the tab becomes visible
+// again after >30 min, reload immediately instead of showing stale data.
+let lastLoadTime = Date.now();
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' &&
+      Date.now() - lastLoadTime > 30 * 60 * 1000) {
+    saveViewState();
+    location.reload();
+  }
+});
+
+// Publish the sticky controls bar's height as --controls-h so the sticky
+// room headers stack directly below it (their `top` reads this var).
+function updateControlsHeight() {
+  const c = document.getElementById('controls');
+  if (c) document.documentElement.style.setProperty('--controls-h', c.offsetHeight + 'px');
+}
+updateControlsHeight();
+window.addEventListener('resize', updateControlsHeight);
+window.addEventListener('load', updateControlsHeight); // after webfont swap
 
 // Re-render on viewport WIDTH changes (rotation, mobile/desktop breakpoint
 // crossings). We deliberately ignore height-only changes because iOS Safari
