@@ -70,7 +70,9 @@ def normalize_host(s):
 
 CAT_MAP = {
     '6GR': '6GR', 'R20': 'R20', 'R20 NR': 'R20',
-    'AI 7/8': 'AI78', 'AI 8': 'AI78', 'AI 9': 'AI78', 'AI/ML': 'AI78',
+    # 'AI/ML' offline sessions at RAN1#126 are Rel-20 AI 9.1 (source cells
+    # read "R20 / AI/ML (60)") — karlla colors them R20 as well.
+    'AI 7/8': 'AI78', 'AI 8': 'AI78', 'AI 9': 'AI78', 'AI/ML': 'R20',
     'Maintenance': 'MAINT', 'MNTC': 'MAINT',
 }
 # Normalized lookup table — docx labels often have stray spaces ("R 20",
@@ -517,9 +519,9 @@ def fuzzy_category(label):
     s = label.lower()
     if 'maint' in s or 'tei' in s or 'mntc' in s:
         return 'MAINT'
-    if s.startswith('r20') or ' r20 ' in s or 'a-iot' in s or 'aiot' in s:
+    if s.startswith('r20') or ' r20 ' in s or 'a-iot' in s or 'aiot' in s or 'ai/ml' in s:
         return 'R20'
-    if 'ai/ml' in s or 'ai 6' in s or 'ai 7' in s or 'ai 8' in s or s.startswith('ai '):
+    if 'ai 6' in s or 'ai 7' in s or 'ai 8' in s or s.startswith('ai '):
         return 'AI78'
     if '6g' in s or 'waveform' in s or 'isac' in s or 'sensing' in s:
         return '6GR'
