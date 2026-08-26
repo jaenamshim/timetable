@@ -271,6 +271,19 @@
     top: var(--controls-h, 0px); /* sit just below the sticky controls bar */
     z-index: 30;
   }
+  /* The leftmost time axis is pinned: sticky-left keeps it on screen in any
+     horizontally-scrolling context (a no-op when everything already fits),
+     with an opaque background so content slides UNDER it, not through it. */
+  .time-col {
+    position: sticky;
+    left: 0;
+    z-index: 20;
+    background: var(--surface);
+  }
+  .time-head {
+    left: 0;
+    z-index: 35; /* above both room heads and the time column */
+  }
   .grid {
     display: grid;
     grid-template-columns: var(--label-w) repeat(var(--n-rooms), minmax(0, 1fr));

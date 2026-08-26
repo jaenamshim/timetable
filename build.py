@@ -519,10 +519,14 @@ def fuzzy_category(label):
         return 'MAINT'
     if s.startswith('r20') or ' r20 ' in s or 'a-iot' in s or 'aiot' in s:
         return 'R20'
-    if 'ai/ml' in s or 'ai 7' in s or 'ai 8' in s or 'ai 9' in s or s.startswith('ai '):
+    if 'ai/ml' in s or 'ai 6' in s or 'ai 7' in s or 'ai 8' in s or s.startswith('ai '):
         return 'AI78'
     if '6g' in s or 'waveform' in s or 'isac' in s or 'sensing' in s:
         return '6GR'
+    # RAN1#126 agenda numbering: 10.x = 6G study items, 9.x = Rel-20 NR.
+    m = re.match(r'^\.?\s*(\d+)\.', s)
+    if m:
+        return '6GR' if m.group(1) == '10' else 'R20'
     return 'R20'
 
 # -------- main parser (existing logic) --------
@@ -564,6 +568,14 @@ def parse_main_cell(lines, period_start, period_end):
     sessions = []
     cursor = effective_start
     cat = None
+    # Minutes remaining that the current category header applies to. A header
+    # like "R20 NR (80)" colors exactly the next 80 min of sessions; once
+    # exhausted, sessions with no new header get a category from their OWN
+    # label instead of inheriting stale state (fixes "R20 NR (80) / AI 9.1
+    # AIML (80) / AI 6/8.1 (40)" where AI 6/8.1 wrongly inherited R20).
+    # Band-wide headers ("6GR (120)" over 3 sessions) still work: their
+    # budget covers all of them.
+    cat_budget = 0
     host = None
     pending = [None, 0, False]
     # Bare labels (no duration, not a category/host/AI number) are accumulated
@@ -605,6 +617,7 @@ def parse_main_cell(lines, period_start, period_end):
                 if canon_cat is not None:
                     cursor = flush(cursor)
                     cat = canon_cat
+                    cat_budget = dur
                     pending[0] = canon_cat; pending[1] = dur; pending[2] = False
                     continue
                 session_label = label.lstrip('.').strip()
@@ -612,11 +625,16 @@ def parse_main_cell(lines, period_start, period_end):
                     dur = max(0, effective_end - cursor)
                 if dur <= 0:
                     continue
+                if cat is not None and cat_budget > 0:
+                    out_cat = CAT_MAP.get(cat, 'R20')
+                    cat_budget -= dur
+                else:
+                    out_cat = fuzzy_category(session_label)
                 sessions.append({
                     'start': to_hhmm(cursor), 'end': to_hhmm(cursor + dur),
                     'title': session_label,
                     'ai': extract_ai_label(session_label),
-                    'category': CAT_MAP.get(cat, 'R20'),
+                    'category': out_cat,
                     'host': host,
                 })
                 cursor += dur
@@ -626,6 +644,7 @@ def parse_main_cell(lines, period_start, period_end):
                 canon_cat = normalize_category(sub)
                 if canon_cat is not None:
                     cursor = flush(cursor); cat = canon_cat
+                    cat_budget = max(0, effective_end - cursor)
                 elif sub in HOSTS:
                     host = normalize_host(sub)
                 else:
