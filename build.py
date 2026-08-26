@@ -37,7 +37,7 @@ MANUAL_DIR = "manual"
 NS = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 NS_W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 
-CATEGORIES = {'6GR', 'R20', 'AI 7/8', 'AI 8', 'AI 9', 'AI/ML', 'Maintenance', 'MNTC'}
+CATEGORIES = {'6GR', 'R20', 'R20 NR', 'AI 7/8', 'AI 8', 'AI 9', 'AI/ML', 'Maintenance', 'MNTC'}
 # All host name variants seen in the docx sources. 'Sorour i' (with space)
 # and 'Sorouri' (no space) are the same person — aliased to canonical 'Sorour'.
 HOSTS = {'Hiroki', 'Sorour', 'Sorouri', 'Sorour i', 'Xiaodong'}
@@ -69,7 +69,7 @@ def normalize_host(s):
     return HOST_ALIASES.get(s, s)
 
 CAT_MAP = {
-    '6GR': '6GR', 'R20': 'R20',
+    '6GR': '6GR', 'R20': 'R20', 'R20 NR': 'R20',
     'AI 7/8': 'AI78', 'AI 8': 'AI78', 'AI 9': 'AI78', 'AI/ML': 'AI78',
     'Maintenance': 'MAINT', 'MNTC': 'MAINT',
 }
@@ -81,6 +81,8 @@ def normalize_category(s):
     CATEGORIES up to whitespace and case; else None."""
     if not s:
         return None
+    # '6GR (TBD)' — a category header whose duration isn't decided yet.
+    s = re.sub(r'\(\s*TBD\s*\)', '', s, flags=re.IGNORECASE)
     return _CAT_NORM.get(re.sub(r'\s+', '', s).upper())
 
 def extract_ai_label(title):
@@ -288,6 +290,26 @@ def location_to_timezone(loc):
         if needle in s:
             return tz
     return 'UTC'
+
+def fetch_agenda_titles(meeting_num):
+    """Fetch AI number -> title mapping from the meeting's agenda.csv on the
+    public FTP (e.g. .../TSGR1_126/Agenda/agenda.csv, rows like
+    '"10.5.3.1","DL CSI acquisition"'). Returns {} on any failure — the
+    mapping is a display nicety, never worth failing the build over."""
+    folder = ("https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_%s/Agenda/"
+              % str(meeting_num).replace('-', '').replace(' ', ''))
+    try:
+        import csv as _csv
+        raw = fetch(folder + "agenda.csv").decode('utf-8-sig', errors='replace')
+        titles = {}
+        for row in _csv.reader(raw.splitlines()):
+            if len(row) >= 2 and row[0].strip():
+                titles[row[0].strip()] = row[1].strip()
+        print("  agenda.csv: %d AI titles" % len(titles), file=sys.stderr)
+        return titles
+    except Exception as e:
+        print("WARN: no agenda.csv (%s)" % e, file=sys.stderr)
+        return {}
 
 def fetch_meeting_info(target_meeting):
     """Find meeting info matching number `target_meeting` (e.g. '125' or '126-bis')."""
@@ -926,6 +948,31 @@ def parse_sorour_cell(lines, period_start, period_end):
     filtered = [l for l in lines if not l.lstrip().startswith('-')]
     return parse_main_cell(filtered, period_start, period_end)
 
+def day_cols_from_header(tbl):
+    """Build a {'Mon': [grid cols...]} map from a table's FIRST row by
+    matching cell text against weekday names, honoring gridSpan.
+
+    This exists because per-meeting docx layouts differ: RAN1#125's Sorour
+    detail table split Tuesday into 2 columns, RAN1#126's uses 1 column per
+    day. A hardcoded map silently reads the WRONG DAY's content when the
+    layout changes (this is exactly what shifted Wed <- Thu at #126).
+    Returns None when fewer than 4 weekdays are recognized, so callers can
+    fall back to a hardcoded map for headerless tables."""
+    rows = tbl.findall('w:tr', NS)
+    if not rows:
+        return None
+    daymap = {}
+    col = 0
+    for tc in rows[0].findall('w:tc', NS):
+        span = cell_span(tc)
+        txt = ' '.join(cell_text_lines(tc)).strip().lower()
+        key = txt[:3]
+        if key in ('mon', 'tue', 'wed', 'thu', 'fri'):
+            day = key.capitalize()
+            daymap.setdefault(day, []).extend(range(col, col + span))
+        col += span
+    return daymap if len(daymap) >= 4 else None
+
 def parse_sorour_docx(docx_bytes):
     with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
         xml = z.read('word/document.xml')
@@ -961,7 +1008,10 @@ def parse_sorour_docx(docx_bytes):
                    else 'Ballroom A (3F)')
     a_only_extras = []
     if len(tables) >= 3:
-        a_cols = {'Mon': [1], 'Tue': [2, 3], 'Wed': [4], 'Thu': [5], 'Fri': [6]}
+        # Prefer the day-column map read from the table's OWN header row —
+        # the layout changes between meetings (see day_cols_from_header).
+        a_cols = day_cols_from_header(tables[2]) or \
+                 {'Mon': [1], 'Tue': [2, 3], 'Wed': [4], 'Thu': [5], 'Fri': [6]}
         a_only_extras = parse_main_table(
             tables[2], a_cols,
             lambda d, o: sorour_room,
@@ -973,7 +1023,10 @@ def parse_sorour_docx(docx_bytes):
     for s in online + offline + a_only_extras:
         if s.get('room') == sorour_room and not s.get('host'):
             s['host'] = 'Sorour'
-    return online + offline + a_only_extras
+    # Detailed-table sessions FIRST: merge_three dedups on (day, room,
+    # start, end) keeping the first occurrence, and the detail table has the
+    # richer titles ('AI 9.4 NTN-NR' vs the overview's terse 'NTN-NR').
+    return a_only_extras + online + offline
 
 # -------- Hiroki parser (bold=category, italic=sub-session) --------
 
@@ -1578,6 +1631,7 @@ def main():
     schedule_data = {
         'meeting': meeting_label,
         'meetingInfo': meeting_info,
+        'aiTitles': fetch_agenda_titles(meeting_num),
         'sources': sources,
         'sourceUrls': source_urls,
         'generated': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
