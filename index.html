@@ -397,6 +397,29 @@
     padding: 1px 5px;
     border-radius: 2px;
   }
+  /* Zero-height strip across the room columns at the current time; carries
+     the NOW label, which JS slides to the visible edge. */
+  .now-overlay {
+    position: relative;
+    height: 0;
+    align-self: start;
+    z-index: 31;
+    pointer-events: none;
+  }
+  .now-overlay .now-label {
+    position: absolute;
+    top: -17px;
+    left: 0;
+    background: var(--now);
+    color: white;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    font-weight: 500;
+    padding: 1px 5px;
+    border-radius: 2px;
+    white-space: nowrap;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+  }
 
   .panel-toggle {
     position: fixed;
@@ -642,7 +665,7 @@ const scheduleData = /*INJECT:SCHEDULE_DATA*/ {
     "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Hiroki_notes/RAN1%23126%20schedule%20for%20Hiroki%20Adhoc2%20sessions_v08_1.docx",
     "https://www.3gpp.org/ftp/Meetings_3GPP_SYNC/RAN1/Inbox/Sorour_notes/RAN1%23126%20Sorour%20sessions%20online%20and%20offline%20schedules%20-%20v01.docx"
   ],
-  "generated": "2026-08-27 18:37 UTC",
+  "generated": "2026-08-27 18:39 UTC",
   "rooms": [
     "Expo Foyer",
     "Praetorium",
@@ -3324,6 +3347,7 @@ function render() {
   });
 
   updateHeaderClock();
+  requestAnimationFrame(positionNowLabels);
 }
 
 function drawNowLine(roomCols, day, PX_PER_MIN) {
@@ -3336,15 +3360,48 @@ function drawNowLine(roomCols, day, PX_PER_MIN) {
     const line = document.createElement("div");
     line.className = "now-line";
     line.style.top = top + "px";
-    if (i === roomCols.length - 1) {
-      const lbl = document.createElement("div");
-      lbl.className = "now-label";
-      lbl.textContent = "NOW " + pad2(mn.hour) + ":" + pad2(mn.minute);
-      line.appendChild(lbl);
-    }
     c.appendChild(line);
   });
+  // The time label rides in a single overlay spanning all room columns, and
+  // gets repositioned to whatever part of the grid is currently on screen
+  // (see positionNowLabels) so "NOW 19:05" stays visible on a phone instead
+  // of sitting off-screen past the last column.
+  const grid = roomCols[0] && roomCols[0].parentElement;
+  if (!grid) return;
+  const overlay = document.createElement("div");
+  overlay.className = "now-overlay";
+  overlay.style.gridColumn = '2 / -1';
+  overlay.style.gridRow = '2';
+  overlay.style.top = top + "px";
+  const lbl = document.createElement("div");
+  lbl.className = "now-label";
+  lbl.textContent = "NOW " + pad2(mn.hour) + ":" + pad2(mn.minute);
+  overlay.appendChild(lbl);
+  grid.appendChild(overlay);
 }
+
+/* Slide each day's NOW label to the right edge of the grid area that is
+   actually visible in the viewport, clamped to the grid's own bounds. With
+   no horizontal scrolling this is a no-op (the label sits at the far right);
+   when the page IS panned horizontally it tracks the view. */
+function positionNowLabels() {
+  document.querySelectorAll('.now-overlay').forEach(ov => {
+    const lbl = ov.querySelector('.now-label');
+    if (!lbl) return;
+    const r = ov.getBoundingClientRect();
+    if (!r.width) return;
+    const visibleRight = Math.min(r.right, window.innerWidth);
+    const visibleLeft  = Math.max(r.left, 0);
+    const w = lbl.offsetWidth || 64;
+    // Offset within the overlay, kept inside both the overlay and the view.
+    let x = visibleRight - r.left - w - 6;
+    x = Math.min(x, r.width - w);
+    x = Math.max(x, visibleLeft - r.left + 2);
+    lbl.style.left = Math.max(0, x) + 'px';
+  });
+}
+window.addEventListener('scroll', positionNowLabels, { passive: true });
+window.addEventListener('resize', positionNowLabels);
 
 function updateHeaderClock() {
   const el = document.getElementById("clock-text");
@@ -3591,7 +3648,7 @@ window.addEventListener('scroll', () => {
 // page was snapping back mid-drag. This keeps the existing DOM intact and
 // only touches the now-line elements + clock text.
 function refreshNowLines() {
-  document.querySelectorAll('.now-line').forEach(el => el.remove());
+  document.querySelectorAll('.now-line, .now-overlay').forEach(el => el.remove());
   const PX_PER_MIN = getPxPerMin();
   document.querySelectorAll('.day-section').forEach(section => {
     const day = section.dataset.day;
@@ -3599,6 +3656,7 @@ function refreshNowLines() {
     const roomCols = Array.from(section.querySelectorAll('.room-col'));
     if (roomCols.length) drawNowLine(roomCols, day, PX_PER_MIN);
   });
+  positionNowLabels();
 }
 
 // Re-position the NOW line every minute while the meeting is happening.
